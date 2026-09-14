@@ -81,6 +81,7 @@ export class Game {
     this.buildArenaColliders();
     [this.ball, this.ballCollider] = this.buildBall();
     this.car = new Car(this.world, { infiniteBoost: true });
+    this.car.setBallCollider(this.ballCollider);
     this.resetKickoff();
     this.capture(this.curr);
     Object.assign(this.prev, structuredClone(this.curr));
@@ -215,13 +216,14 @@ export class Game {
         .setCanSleep(false),
     );
     const volume = (4 / 3) * Math.PI * BALL.radius ** 3;
-    // Combine rules are chosen so ball-arena = 0.6, car-arena = 0.3 (see tuning.ts for the car-ball compromise).
+    // Combine rules (see tuning.ts): restitution ball-arena 0.6, car-arena 0.3, car-ball 0.18;
+    // friction ball-arena 0.35 (arena carries the ball's value), car-ball 2.0 via the car's Max rule.
     const collider = this.world.createCollider(
       RAPIER.ColliderDesc.ball(BALL.radius)
         .setDensity(BALL.mass / volume)
         .setRestitution(BALL.restitution)
         .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Multiply)
-        .setFriction(BALL.friction)
+        .setFriction(BALL.carFriction)
         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min),
       body,
     );
@@ -230,9 +232,11 @@ export class Game {
 
   private buildArenaColliders(): void {
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    // The arena carries the ball's friction (0.35, Min) because the ball collider holds the
+    // car-ball value (2.0) so the car's Max rule can pick it up. RL's own arena base is 0.6.
     const material = (desc: RAPIER.ColliderDesc) =>
       desc
-        .setFriction(ARENA.collisionFriction)
+        .setFriction(BALL.friction)
         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
         .setRestitution(1.0) // multiplied by the ball's 0.6; the car uses Min with its own 0.3
         .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min);

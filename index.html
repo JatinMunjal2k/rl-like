@@ -5,16 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RL-like</title>
     <style>
-      html, body { margin: 0; height: 100%; background: #0a0f16; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+      html, body { margin: 0; height: 100%; background: #0a0f16; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: #e8eef5; }
       #app { position: fixed; inset: 0; }
       canvas { display: block; }
-      #hud { position: fixed; inset: 0; pointer-events: none; color: #e8eef5; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+      #hud { position: fixed; inset: 0; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
       #score { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 28px; font-weight: 700; letter-spacing: 1px; }
       #score .blue { color: #4aa3ff; } #score .orange { color: #ff9a3c; }
-      #status { position: absolute; left: 14px; bottom: 14px; font-size: 13px; line-height: 1.5; opacity: .9; max-width: 460px; }
+      #status { position: absolute; left: 14px; bottom: 14px; font-size: 13px; line-height: 1.5; opacity: .9; max-width: 520px; }
       #status .ok { color: #7CFC9A; } #status .warn { color: #ffd166; }
       #banner { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); font-size: 56px; font-weight: 800; display: none; }
       kbd { background: rgba(255,255,255,.12); border-radius: 3px; padding: 0 4px; font-family: inherit; }
+
+      .menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(6, 10, 18, .78); z-index: 10; }
+      .menu[hidden] { display: none; }
+      .menu-panel { background: #121a28; border: 1px solid #2a3a55; border-radius: 12px; padding: 28px 32px; min-width: 320px; box-shadow: 0 20px 60px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 12px; }
+      .menu-panel[hidden] { display: none; }
+      .menu-title { margin: 0 0 8px; font-size: 32px; letter-spacing: 1px; }
+      h2.menu-title { font-size: 22px; }
+      .menu-hint { margin: 4px 0 0; font-size: 13px; opacity: .7; }
+      .menu-button { font: inherit; font-size: 17px; padding: 12px 18px; border-radius: 8px; border: 1px solid #2f4a75; background: #1b2a44; color: #e8eef5; cursor: pointer; text-align: left; }
+      .menu-button:hover { background: #24395f; }
+      .menu-row { display: flex; gap: 10px; margin-top: 8px; }
+      .menu-row .menu-button { flex: 1; text-align: center; font-size: 15px; padding: 10px 14px; }
+      .bind-table { display: flex; flex-direction: column; gap: 6px; }
+      .bind-row { display: grid; grid-template-columns: 200px 140px 140px; gap: 8px; align-items: center; font-size: 14px; }
+      .bind-head { opacity: .6; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+      .bind-cell { font-size: 14px; padding: 8px 10px; text-align: center; }
+      .bind-cell.capturing { background: #5a4a10; border-color: #ffd166; }
     </style>
   </head>
   <body>

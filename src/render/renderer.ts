@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { ARENA, BALL } from '../sim/rl';
-import { HITBOX_HALF } from '../sim/car';
+import { HITBOX_HALF, HITBOX_OFFSET } from '../sim/car';
 import type { ArenaGeometry } from '../sim/arena';
 import type { BodyState } from '../sim/game';
 
@@ -107,9 +107,11 @@ export class Renderer {
     }
   }
 
-  /** The car is exactly its hitbox: one box, a bright nose stripe, and a boost flame. */
+  /** The car is exactly its hitbox: one box, a bright nose stripe, and a boost flame, offset from the body origin like RL. */
   private buildCar(): THREE.Mesh {
-    const g = this.carGroup;
+    const g = new THREE.Group();
+    g.position.copy(HITBOX_OFFSET);
+    this.carGroup.add(g);
     const w = HITBOX_HALF.x * 2;
     const h = HITBOX_HALF.y * 2;
     const l = HITBOX_HALF.z * 2;
@@ -132,7 +134,7 @@ export class Renderer {
     flame.visible = false;
     g.add(flame);
 
-    this.scene.add(g);
+    this.scene.add(this.carGroup);
     return flame;
   }
 

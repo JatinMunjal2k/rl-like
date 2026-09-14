@@ -5,7 +5,8 @@
  * unreal units (uu, uu/s, uu/s², rad, s) with a `* UU` conversion to metres where the
  * sim consumes it. If you change a value here you are deviating from the real game.
  *
- *   [RS]  RocketSim by ZealanL, src/RLConst.h, src/Sim/Car/CarConfig/CarConfig.cpp
+ *   [RS]  RocketSim by ZealanL: src/RLConst.h, src/Sim/Car/Car.cpp,
+ *         src/Sim/Car/CarConfig/CarConfig.cpp, src/Sim/btVehicleRL/btVehicleRL.cpp
  *         https://github.com/ZealanL/RocketSim (reverse-engineered, tick-accurate sim)
  *   [WIKI] RLBot "Useful game values": https://wiki.rlbot.org/v4/botmaking/useful-game-values/
  *
@@ -14,6 +15,9 @@
 
 /** 1 unreal unit = 1 cm. All sim math is in metres. */
 export const UU = 0.01;
+/** [RS] Bullet works in "BT" units: 1 BT = 50 uu = 0.5 m. Some formulas are replicated in BT. */
+export const BT = 0.5;
+export const M_TO_BT = 1 / BT;
 
 export const TICK_RATE = 120; // [RS] RL physics runs at 120 Hz
 export const TICK_DT = 1 / TICK_RATE;
@@ -84,6 +88,11 @@ export const BALL_CAR_EXTRA_IMPULSE = {
  * [RS] CarConfig.cpp CAR_CONFIG_OCTANE. RocketSim notes these hitbox extents reproduce the
  * real inertia tensor; the commonly shared 118.01 x 84.20 x 36.16 come from
  * GetLocalCollisionExtent() and are slightly off. Axes: x forward, y right, z up.
+ *
+ * suspensionRest* is the hardpoint-to-contact distance at rest INCLUDING the wheel radius:
+ * with the hardpoints 37.755 uu above the ground at rest (restZ + hitboxOffset.z) the
+ * spring/gravity balance below lands within ~1.3 uu of the floor, which is the only reading
+ * consistent with CAR_SPAWN_REST_Z = 17.
  */
 export const OCTANE = {
   hitboxSize: { x: 120.507 * UU, y: 86.6994 * UU, z: 38.6591 * UU },
@@ -93,7 +102,7 @@ export const OCTANE = {
   rearWheelRadius: 15.0 * UU,
   frontSuspensionRest: 38.755 * UU,
   rearSuspensionRest: 37.055 * UU,
-  /** Wheel connection points relative to the car origin (y mirrored for left/right). */
+  /** Wheel hardpoints relative to the car origin (y mirrored for left/right). */
   frontWheelOffset: { x: 51.25 * UU, y: 25.9 * UU, z: 20.755 * UU },
   rearWheelOffset: { x: -33.75 * UU, y: 29.5 * UU, z: 20.755 * UU },
   /** [RS] CAR_SPAWN_REST_Z: height of the car origin when resting on flat ground. */
@@ -106,77 +115,44 @@ export const CAR = {
   supersonicStartSpeed: 2200 * UU, // [RS]
   supersonicMaintainMinSpeed: 2100 * UU, // [RS]
   supersonicMaintainMaxTime: 1.0, // [RS]
-  maxAngularSpeed: 5.5, // [RS] CAR_MAX_ANG_SPEED rad/s
+  maxAngularSpeed: 5.5, // [RS] CAR_MAX_ANG_SPEED rad/s, clamped every tick, flips included
 
-  /** [WIKI] Throttle acceleration is 1600 uu/s² at rest falling to 160 at 1400 and 0 at 1410. */
-  throttleAccelMax: 1600 * UU,
-  /** [RS] DRIVE_SPEED_TORQUE_FACTOR_CURVE: speed (uu/s) -> fraction of throttleAccelMax. */
+  // --- Wheels and suspension [RS] btVehicleRL.cpp + RLConst.h ---------------------
+  /** Bullet raycast-vehicle spring: force = (rest - length) * stiffness * (1 / (normal·up)) - damping * relVel, then * forceScale, never negative. */
+  suspensionStiffness: 500,
+  suspensionDampingCompression: 25,
+  suspensionDampingRelaxation: 40,
+  suspensionForceScaleFront: 36 - 1 / 4, // = 35.75
+  suspensionForceScaleBack: 54 + 1 / 4 + 1.5 / 100, // ≈ 54.265
+  maxSuspensionTravel: 12 * UU,
+  /** Subtracted from the wheel ray length. Given in BT units in RocketSim (0.05 BT = 2.5 uu). */
+  suspensionSubtraction: 0.05 * BT,
+  /** [RS] isOnGround when at least this many wheels touch something (the ball counts). */
+  wheelsForGround: 3,
+
+  // --- Driving [RS] Car.cpp -------------------------------------------------------
+  /** THROTTLE_TORQUE_AMOUNT = mass * 400 per wheel -> 400 uu/s² per wheel, 1600 total. */
+  throttleAccelPerWheel: 400 * UU,
+  /** [RS] DRIVE_SPEED_TORQUE_FACTOR_CURVE: speed (uu/s) -> fraction of throttle force. */
   driveSpeedTorqueFactorCurve: [
     [0, 1.0],
     [1400, 0.1],
     [1410, 0.0],
   ] as [number, number][],
-  brakeAccel: 3500 * UU, // [WIKI] brake deceleration
-  coastAccel: 525 * UU, // [WIKI] coast deceleration ([RS] COASTING_BRAKE_FACTOR 0.15 of brake)
+  /** BRAKE_TORQUE_AMOUNT = mass * (14.25 + 1/3) in BT -> 875 uu/s² per wheel at full brake, 3500 total. */
+  brakeAccelPerWheel: (14.25 + 1 / 3) * BT,
+  /** [RS] ROLLING_FRICTION_SCALE_MAGIC: rolling friction = clamp(-relVel * this, ±brake), BT units. */
+  rollingFrictionScaleMagic: 113.73963,
+  coastingBrakeFactor: 0.15, // [RS] COASTING_BRAKE_FACTOR
+  stoppingForwardVel: 25 * UU, // [RS] STOPPING_FORWARD_VEL: below this, no-throttle = full brake
+  brakingNoThrottleSpeedThresh: 0.01 * UU, // [RS]
+  throttleDeadzone: 0.001, // [RS]
   airThrottleAccel: (200 / 3) * UU, // [RS] THROTTLE_AIR_ACCEL = 66.667
-
-  boostAccelGround: (2975 / 3) * UU, // [RS] = 991.667
-  boostAccelAir: (3175 / 3) * UU, // [RS] = 1058.333
-  boostMax: 100, // [RS]
-  boostUsedPerSecond: 100 / 3, // [RS]
-  boostMinTime: 0.1, // [RS] once started, boost stays on at least this long
-
-  jumpImmediateForce: (875 / 3) * UU, // [RS] = 291.667 uu/s instant velocity
-  jumpAccel: (4375 / 3) * UU, // [RS] = 1458.333 uu/s² while holding
-  jumpMinTime: 0.025, // [RS] jump always lasts at least this
-  jumpMaxTime: 0.2, // [RS] hold gives acceleration up to this
-  jumpResetTimePad: 1 / 40, // [RS]
-  doubleJumpMaxDelay: 1.25, // [RS] window after the FIRST jump ENDS
-  doubleJumpImpulse: (875 / 3) * UU, // [WIKI] same as the first jump
-
-  /** [RS] Flip (dodge) constants. */
-  flipInitialVelScale: 500 * UU, // FLIP_INITIAL_VEL_SCALE
-  flipTorqueTime: 0.65, // FLIP_TORQUE_TIME
-  flipTorqueMinTime: 0.41, // FLIP_TORQUE_MIN_TIME (flip cancel can end torque after this)
-  flipPitchLockTime: 1.0, // FLIP_PITCHLOCK_TIME
-  flipPitchLockExtraTime: 0.3, // FLIP_PITCHLOCK_EXTRA_TIME
-  flipZDamp120: 0.35, // FLIP_Z_DAMP_120: per-tick factor applied to vertical velocity
-  flipZDampStart: 0.15, // FLIP_Z_DAMP_START
-  flipZDampEnd: 0.21, // FLIP_Z_DAMP_END
-  flipTorqueX: 260, // FLIP_TORQUE_X (side flips)
-  flipTorqueY: 224, // FLIP_TORQUE_Y (front/back flips)
-  flipForwardImpulseMaxSpeedScale: 1.0, // FLIP_FORWARD_IMPULSE_MAX_SPEED_SCALE
-  flipSideImpulseMaxSpeedScale: 1.9, // FLIP_SIDE_IMPULSE_MAX_SPEED_SCALE
-  flipBackwardImpulseMaxSpeedScale: 2.5, // FLIP_BACKWARD_IMPULSE_MAX_SPEED_SCALE
-  flipBackwardImpulseScaleX: 16 / 15, // FLIP_BACKWARD_IMPULSE_SCALE_X
-  flipDodgeDeadzone: 0.1, // [RS] stick magnitude below this = double jump instead of dodge
-  flipBackwardSpeedThreshold: 100 * UU, // [RS] |forwardSpeed| below which "backwards" is judged from stick only
-
-  /** [RS] CAR_TORQUE_SCALE converts raw torque constants to rad/s². */
-  torqueScale: ((2 * Math.PI) / 65536) * 1000,
-  /** [RS] CAR_AIR_CONTROL_TORQUE (pitch, yaw, roll) and CAR_AIR_CONTROL_DAMPING, raw. */
-  airControlTorque: { pitch: 130, yaw: 95, roll: 400 },
-  airControlDamping: { pitch: 30, yaw: 20, roll: 50 },
-  /**
-   * [WIKI] The same air control expressed as measured angular accelerations (rad/s²) and
-   * damping coefficients (1/s). These are what the sim uses; they match the raw values above.
-   */
-  airPitchAccel: 12.46,
-  airYawAccel: 9.11,
-  airRollAccel: 38.34,
-  airPitchDamp: 2.798,
-  airYawDamp: 3.14,
-  airRollDamp: 4.47,
-
-  /** [RS] Autoflip: pressing jump while upside down on a surface rights the car. */
-  autoflipImpulse: 200 * UU, // CAR_AUTOFLIP_IMPULSE, along -carUp
-  autoflipTorque: 50, // CAR_AUTOFLIP_TORQUE rad/s² about carForward
-  autoflipTime: 0.4, // CAR_AUTOFLIP_TIME, scaled by |roll| / π
-  autoflipNormalZThreshold: Math.SQRT1_2, // CAR_AUTOFLIP_NORMZ_THRESH: surface normal must point up
-  autoflipRollThreshold: 2.8, // CAR_AUTOFLIP_ROLL_THRESH rad: car must be nearly upside down
-  /** [RS] Autoroll: with throttle held and partial contact, the car is pushed and rolled onto its wheels. */
-  autorollForce: 100 * UU, // CAR_AUTOROLL_FORCE (acceleration toward the surface)
-  autorollTorque: 80, // CAR_AUTOROLL_TORQUE
+  /** [RS] wheel friction impulses are scaled by mass / 3 (frictionScale in calcFrictionImpulses). */
+  frictionMassDivisor: 3,
+  /** Bullet resolveSingleBilateral contact damping: side impulse = -0.2 * relVel / jacDiagAB. */
+  bilateralContactDamping: 0.2,
+  /** Wheel friction impulses are applied at the contact point projected to the chassis' up height. */
 
   /** [RS] STEER_ANGLE_FROM_SPEED_CURVE: speed (uu/s) -> front wheel steer angle (rad). */
   steerAngleFromSpeedCurve: [
@@ -192,10 +168,37 @@ export const CAR = {
     [0, 0.39235],
     [2500, 0.1261],
   ] as [number, number][],
+  /** [RS] Handbrake value ramps up at 5/s and down at 2/s. */
+  powerslideRiseRate: 5,
+  powerslideFallRate: 2,
   /**
-   * [WIKI] Measured turning curvature (1/uu) vs speed (uu/s). Yaw rate = speed * curvature.
-   * This is the community-measured result of the steer-angle curve plus the wheel model.
+   * [RS] Wheel friction curves. Input is the lateral slip ratio
+   *   |v_lat| / (|v_lat| + |v_long|)  (0 if |v_lat| < 5 uu/s), output a friction multiplier.
    */
+  latFrictionCurve: [
+    [0, 1.0],
+    [1, 0.2],
+  ] as [number, number][],
+  /** LONG_FRICTION_CURVE is empty in RocketSim (always 1). */
+  handbrakeLatFrictionFactorCurve: [[0, 0.1]] as [number, number][],
+  handbrakeLongFrictionFactorCurve: [
+    [0, 0.5],
+    [1, 0.9],
+  ] as [number, number][],
+  /** Applied to both friction values when there is no throttle; input is the contact normal's z (our y). */
+  nonStickyFrictionFactorCurve: [
+    [0, 0.1],
+    [0.7075, 0.5],
+    [1, 1.0],
+  ] as [number, number][],
+  latFrictionSlipMinSpeed: 5 * UU, // [RS] below this lateral speed the curve input is 0
+  /**
+   * [RS] Sticky force (Car.cpp): with any wheel contact, a central force of
+   *   scale * gravity toward the surface, scale = 0.5 (+ 1 - |up.z| when throttling or moving).
+   * On flat ground that is the community's "325 uu/s²"; on walls it rises to 975.
+   */
+  stickyBaseScale: 0.5,
+  /** [WIKI] Measured turning curvature (1/uu) vs speed. Kept for reference/tests; the sim now steers the wheels. */
   turnCurvatureCurve: [
     [0, 0.0069],
     [500, 0.00398],
@@ -204,54 +207,81 @@ export const CAR = {
     [1750, 0.0011],
     [2300, 0.00088],
   ] as [number, number][],
-  /** [RS] Handbrake ramps up at 5/s and down at 2/s (POWERSLIDE_RISE_RATE / FALL_RATE). */
-  powerslideRiseRate: 5,
-  powerslideFallRate: 2,
-  /** [RS] Wheel friction curves. Inputs are slip ratios; outputs are friction multipliers. */
-  latFrictionCurve: [
-    [0, 1.0],
-    [1, 0.2],
-  ] as [number, number][],
-  handbrakeLatFrictionFactor: 0.1,
-  handbrakeLongFrictionFactorCurve: [
-    [0, 0.5],
-    [1, 0.9],
-  ] as [number, number][],
-  nonStickyFrictionFactorCurve: [
-    [0, 0.1],
-    [0.7075, 0.5],
-    [1, 1.0],
-  ] as [number, number][],
+
+  // --- Boost [RS] -------------------------------------------------------------------
+  boostAccelGround: (2975 / 3) * UU, // = 991.667
+  boostAccelAir: (3175 / 3) * UU, // = 1058.333
+  boostMax: 100,
+  boostUsedPerSecond: 100 / 3,
+  boostMinTime: 0.1, // once started, boost stays on at least this long
+
+  // --- Jumping [RS] -----------------------------------------------------------------
+  jumpImmediateForce: (875 / 3) * UU, // = 291.667 uu/s instant velocity
+  jumpAccel: (4375 / 3) * UU, // = 1458.333 uu/s² while holding
+  jumpPreMinAccelScale: 0.62, // acceleration scale before jumpMinTime
+  jumpMinTime: 0.025,
+  jumpMaxTime: 0.2,
+  jumpResetTimePad: 1 / 40, // hasJumped is not cleared by ground contact before jumpMinTime + this
+  doubleJumpMaxDelay: 1.25, // window after the FIRST jump ENDS; a car that fell off a surface without jumping can flip any time
+  doubleJumpImpulse: (875 / 3) * UU,
+
+  // --- Flips (dodges) [RS] ----------------------------------------------------------
+  flipInitialVelScale: 500 * UU,
+  flipTorqueTime: 0.65,
+  flipTorqueMinTime: 0.41,
+  flipPitchLockTime: 1.0,
+  flipPitchLockExtraTime: 0.3,
+  flipZDamp120: 0.35, // per-tick factor applied to vertical velocity while flipping
+  flipZDampStart: 0.15,
+  flipZDampEnd: 0.21,
+  /** Applied straight as angular acceleration (rad/s²) about the car's local axes; the 5.5 cap is hit in 3 ticks. */
+  flipTorqueX: 260, // side flips (roll)
+  flipTorqueY: 224, // front/back flips (pitch)
+  flipForwardImpulseMaxSpeedScale: 1.0,
+  flipSideImpulseMaxSpeedScale: 1.9,
+  flipBackwardImpulseMaxSpeedScale: 2.5,
+  flipBackwardImpulseScaleX: 16 / 15,
+  flipDodgeDeadzone: 0.1,
+  flipBackwardSpeedThreshold: 100 * UU,
+  /** Flip cancel: pitch input with the same sign as the flip's pitch torque scales that torque by (1 - |pitch|). */
+
+  // --- Air control [RS] -------------------------------------------------------------
+  /** CAR_TORQUE_SCALE converts the raw torque/damping constants to rad/s² and 1/s. */
+  torqueScale: ((2 * Math.PI) / 65536) * 1000,
+  airControlTorque: { pitch: 130, yaw: 95, roll: 400 }, // CAR_AIR_CONTROL_TORQUE
+  airControlDamping: { pitch: 30, yaw: 20, roll: 50 }, // CAR_AIR_CONTROL_DAMPING
+  /** Damping on each axis is multiplied by (1 - |input on that axis|). */
+
+  // --- Recovery [RS] ----------------------------------------------------------------
+  autoflipImpulse: 200 * UU, // along -carUp
+  autoflipTorque: 50, // rad/s² about carForward
+  autoflipTime: 0.4, // scaled by |roll| / π
+  autoflipNormalZThreshold: Math.SQRT1_2,
+  autoflipRollThreshold: 2.8,
+  autorollForce: 100 * UU,
+  autorollTorque: 80,
 
   /** [RS] Contact materials. */
   worldFriction: 0.3, // CARWORLD_COLLISION_FRICTION
   worldRestitution: 0.3, // CARWORLD_COLLISION_RESTITUTION
-  carFriction: 0.09, // CARCAR_COLLISION_FRICTION
-  carRestitution: 0.1, // CARCAR_COLLISION_RESTITUTION
-
-  /** [RS] Bullet raycast-vehicle suspension parameters (not yet used; see tuning.ts hover model). */
-  suspensionStiffness: 500,
-  wheelsDampingCompression: 25,
-  wheelsDampingRelaxation: 40,
-  maxSuspensionTravel: 12 * UU,
+  carFriction: 0.09,
+  carRestitution: 0.1,
 };
 
 // ---------------------------------------------------------------------------------
-// Boost pads [RS] (not implemented yet, kept for the next step)
+// Boost pads [RS] (not implemented, kept for later)
 // ---------------------------------------------------------------------------------
 export const BOOST_PADS = {
   bigAmount: 100,
   smallAmount: 12,
   bigCooldown: 10,
   smallCooldown: 4,
-  /** Pickup volume: a cylinder of this height and radius, plus a box. */
   cylinderHeight: 95 * UU,
   cylinderRadiusBig: 208 * UU,
   cylinderRadiusSmall: 144 * UU,
   boxHeight: 64 * UU,
   boxRadiusBig: 160 * UU,
   boxRadiusSmall: 120 * UU,
-  /** [x, y] in uu (RL frame: y is the long axis). */
   bigLocations: [
     [-3584, 0],
     [3584, 0],

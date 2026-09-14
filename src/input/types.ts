@@ -32,5 +32,6 @@ export interface FrameInput {
   car: CarInput;
   resetPressed: boolean;
   toggleCameraPressed: boolean;
+  menuPressed: boolean;
   controllerName: string | null;
 }

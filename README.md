@@ -69,12 +69,21 @@ The car follows RocketSim's reverse-engineered vehicle:
 - Car-ball restitution ends at 0.18 (RL 0.0); friction is exact (2.0).
 - Arena ramps are quarter circles of 256 uu (floor) and 200 uu (ceiling) built from flat segments; RL's mesh is hand-modelled and not distributable. Unknown and omitted: the blend between corner walls and side/back walls, rounded goal posts and crossbar.
 
+## Settings
+
+Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges and defaults) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone). The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
+
 ## Match flow and HUD
 
-- 34 boost pads at RL's positions with RL's pickup volumes (cylinder 208/144 uu radius, 95 uu tall, or box 160/120 uu, 64 uu tall), 100 / 12 boost, 10 s / 4 s cooldown. Boost starts at 33 at kickoff.
-- Kickoffs cycle through RL's five blue spawn points in a shuffled order that changes every cycle; reset does the same.
-- On a goal the ball freezes and disappears for 2 s, then kickoff.
-- HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red and pulses while supersonic; the boost flame goes white.
+- 34 boost pads at RL's positions with RL's pickup volumes (cylinder 208/144 uu radius, 95 uu tall, or box 160/120 uu, 64 uu tall), 100 / 12 boost, 10 s / 4 s cooldown. Free play currently uses infinite boost; pads still light up and recharge.
+- Reset cycles through RL's five blue spawn points in a shuffled order that changes every cycle.
+- On a goal the ball disappears for 2 s and respawns at the centre spot; play is never paused, cars keep driving. The banner shows the goal speed in km/h and uu/s.
+- HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red, larger and pulsing at the 2300 uu/s cap; the boost flame goes white when supersonic.
+- The menu shows over black with the game not rendered.
+
+## Engine note: gyroscopic precession
+
+Rapier integrates gyroscopic precession for the car's box inertia, so any rotation about a non-principal axis (every diagonal flip) would tumble and drift the heading. Bullet, and therefore Rocket League, does not. After each physics step, if nothing touched the car, its pre-step angular velocity is restored (`Car.postStep`).
 
 ## Physics still missing compared to Rocket League
 

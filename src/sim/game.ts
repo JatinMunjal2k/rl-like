@@ -4,7 +4,7 @@ import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, BOOST_PADS, CAR, GRAVITY, KICKOFF_
 import { TUNING } from './tuning';
 import { allColliderBoxes, buildArenaGeometry, type ArenaGeometry } from './arena';
 import { Car } from './car';
-import { EMPTY_INPUT, type CarInput } from '../input/types';
+import type { CarInput } from '../input/types';
 
 /** Plain-number transform so it can be copied, interpolated and later sent over the wire. */
 export interface BodyState {
@@ -71,8 +71,10 @@ export class Game {
   tick = 0;
   score: Record<Team, number> = { blue: 0, orange: 0 };
   lastGoal: Team | null = null;
-  /** Seconds left in the post-goal freeze before kickoff. The ball is hidden and frozen meanwhile. */
+  /** Seconds until the ball respawns after a goal. The ball is hidden meanwhile; cars keep driving. */
   goalPause = 0;
+  /** Ball speed (m/s) at the moment of the last goal. */
+  lastGoalSpeed = 0;
   /** True on ticks where the car touched the ball. */
   ballTouched = false;
   /** Index into KICKOFF_SPAWNS used for the current kickoff. */
@@ -95,7 +97,7 @@ export class Game {
     this.arena = buildArenaGeometry();
     this.buildArenaColliders();
     [this.ball, this.ballCollider] = this.buildBall();
-    this.car = new Car(this.world, { infiniteBoost: false });
+    this.car = new Car(this.world, { infiniteBoost: true }); // free play: pads still work, boost never runs out
     this.car.setBallCollider(this.ballCollider);
     this.pads = buildPads();
     this.resetKickoff();
@@ -112,18 +114,17 @@ export class Game {
     Object.assign(this.prev.ball, this.curr.ball);
     this.prev.tick = this.curr.tick;
 
-    let effective = input;
     if (this.goalPause > 0) {
       this.goalPause -= dt;
-      effective = EMPTY_INPUT;
       if (this.goalPause <= 0) {
         this.goalPause = 0;
-        this.resetKickoff();
+        this.respawnBall();
       }
     }
 
-    this.car.tick(effective, dt);
+    this.car.tick(input, dt);
     this.world.step();
+    this.car.postStep();
     this.tick++;
 
     this.updatePads(dt);
@@ -147,14 +148,18 @@ export class Game {
     // about +Y sends (0,0,-1) to (-sin ψ, 0, -cos ψ), so solve for the RL heading (cos θ, sin θ).
     const yaw = Math.atan2(-Math.cos(yawRL), -Math.sin(yawRL));
     this.car.reset(sx * UU, sy * UU, yaw);
+    this.goalPause = 0;
+    this.respawnBall();
+    for (const p of this.pads) p.cooldown = 0;
+  }
 
+  /** Ball back to the centre spot, at rest, dynamic and visible. */
+  private respawnBall(): void {
     this.ball.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
     this.ball.setTranslation({ x: 0, y: BALL.restZ, z: 0 }, true);
     this.ball.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
-
-    for (const p of this.pads) p.cooldown = 0;
   }
 
   /** Full reset including score. */
@@ -196,10 +201,13 @@ export class Game {
     this.score[team]++;
     this.lastGoal = team;
     this.goalPause = TUNING.goalResetDelay;
-    // RL explodes the ball; we freeze and hide it until kickoff.
+    const v = this.ball.linvel();
+    this.lastGoalSpeed = Math.hypot(v.x, v.y, v.z);
+    // RL explodes the ball; we park it out of play (fixed, under the floor) and hide it until it respawns.
     this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.ball.setBodyType(RAPIER.RigidBodyType.Fixed, true);
+    this.ball.setTranslation({ x: 0, y: -50, z: 0 }, true);
   }
 
   /**

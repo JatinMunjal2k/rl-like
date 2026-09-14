@@ -34,4 +34,13 @@ export interface FrameInput {
   toggleCameraPressed: boolean;
   menuPressed: boolean;
   controllerName: string | null;
+  /** Menu navigation. `*Held` are current states, `accept`/`back` are press edges. */
+  nav: {
+    upHeld: boolean;
+    downHeld: boolean;
+    leftHeld: boolean;
+    rightHeld: boolean;
+    accept: boolean;
+    back: boolean;
+  };
 }

@@ -4,10 +4,14 @@ import { Renderer } from './render/renderer';
 import { FollowCamera } from './render/camera';
 import { InputManager } from './input/input';
 import { Menu } from './ui/menu';
+import { loadSettings, saveSettings } from './settings';
 
 const app = document.getElementById('app')!;
+const hudEl = document.getElementById('hud')!;
 const scoreEl = document.getElementById('score')!;
 const bannerEl = document.getElementById('banner')!;
+const bannerTitleEl = bannerEl.querySelector('.title')!;
+const bannerSpeedEl = bannerEl.querySelector('.goalSpeed')!;
 const fpsEl = document.getElementById('fps')!;
 const camModeEl = document.getElementById('camMode')!;
 const controllerEl = document.getElementById('controller')!;
@@ -18,6 +22,8 @@ const boostValueEl = document.getElementById('boostValue')!;
 
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 56;
 boostFillEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
+/** Speed readout goes red only at the hard cap (within 10 uu/s of 2300). */
+const MAX_SPEED_UU = CAR.maxSpeed / UU - 10;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -35,25 +41,36 @@ function setCamMode(ballCam: boolean): void {
 }
 
 async function main(): Promise<void> {
-  controllerEl.textContent = 'Loading physics…';
+  const settings = loadSettings();
   const game = await Game.create();
   const renderer = new Renderer(app, game.arena, game.pads);
-  const followCam = new FollowCamera();
-  const input = new InputManager();
-  const menu = new Menu(document.body, input);
+  const followCam = new FollowCamera(settings);
+  const input = new InputManager(settings);
+  const menu = new Menu(document.body, input, settings);
 
   // Debug handle for the browser console.
-  (window as unknown as { __game: Game; __input: InputManager }).__game = game;
-  (window as unknown as { __game: Game; __input: InputManager }).__input = input;
+  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__game = game;
+  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__input = input;
+  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__menu = menu;
+
+  const applySettings = () => {
+    saveSettings(settings);
+    followCam.applyProjection(renderer.camera);
+    game.car.dodgeDeadzone = settings.controls.dodgeDeadzone;
+  };
+  applySettings();
+  window.addEventListener('resize', () => followCam.applyProjection(renderer.camera));
 
   let controllerName: string | null = null;
   input.onControllerChange = (name) => {
     controllerName = name;
     setController(name);
   };
+  menu.onSettingsChanged = applySettings;
   menu.onPlay = () => {
     last = performance.now();
     accumulator = 0;
+    input.blockJumpUntilRelease();
   };
   setController(null);
   setCamMode(followCam.ballCam);
@@ -79,28 +96,37 @@ async function main(): Promise<void> {
     }
     if (fi.menuPressed) menu.toggle();
 
-    if (!menu.open) {
-      accumulator += frameDt;
-      if (fi.resetPressed) game.resetMatch();
-      if (fi.toggleCameraPressed) {
-        followCam.toggle();
-        setCamMode(followCam.ballCam);
-      }
-
-      // Fixed-step simulation; render interpolates between the last two ticks.
-      let steps = 0;
-      while (accumulator >= TICK_DT && steps < 12) {
-        game.step(fi.car, TICK_DT);
-        accumulator -= TICK_DT;
-        steps++;
-      }
-      if (steps === 12) accumulator = 0; // Tab was hidden or the machine stalled; drop the backlog.
+    if (menu.open) {
+      // Menu: black screen, no simulation, no rendering.
+      menu.navigate(fi.nav, frameDt);
+      hudEl.hidden = true;
+      requestAnimationFrame(frame);
+      return;
     }
+    hudEl.hidden = false;
+
+    accumulator += frameDt;
+    if (fi.resetPressed) game.resetMatch();
+    if (fi.toggleCameraPressed) {
+      followCam.toggle();
+      setCamMode(followCam.ballCam);
+    }
+
+    // Fixed-step simulation; render interpolates between the last two ticks.
+    let steps = 0;
+    while (accumulator >= TICK_DT && steps < 12) {
+      game.step(fi.car, TICK_DT);
+      accumulator -= TICK_DT;
+      steps++;
+    }
+    if (steps === 12) accumulator = 0; // Tab was hidden or the machine stalled; drop the backlog.
     const alpha = Math.min(1, accumulator / TICK_DT);
 
     renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.car.boosting, game.car.supersonic, game.ballVisible);
     renderer.syncPads(game.pads);
-    followCam.update(renderer.camera, renderer.carGroup, renderer.ballMesh, frameDt);
+    const q = renderer.carGroup.quaternion;
+    const upY = 1 - 2 * (q.x * q.x + q.z * q.z);
+    followCam.update(renderer.camera, renderer.carGroup, renderer.ballMesh, { holdHeading: game.car.isFlipping || Math.abs(upY) < 0.35 }, frameDt);
     renderer.render();
 
     // --- HUD ---------------------------------------------------------------------
@@ -109,8 +135,8 @@ async function main(): Promise<void> {
     if (speedUU !== lastSpeedUU) {
       lastSpeedUU = speedUU;
       speedValueEl.textContent = String(speedUU);
+      speedEl.classList.toggle('max', speedUU >= MAX_SPEED_UU);
     }
-    speedEl.classList.toggle('supersonic', game.car.supersonic);
 
     const boost = Math.round(game.car.boost);
     if (boost !== lastBoost) {
@@ -136,10 +162,12 @@ async function main(): Promise<void> {
       lastScore = scoreText;
       scoreEl.innerHTML = `<span class="blue">BLUE ${game.score.blue}</span> &nbsp;–&nbsp; <span class="orange">${game.score.orange} ORANGE</span>`;
       if (game.lastGoal) {
-        bannerEl.textContent = game.lastGoal === 'blue' ? 'GOAL!' : 'OWN GOAL';
+        const uu = game.lastGoalSpeed / UU;
+        bannerTitleEl.textContent = game.lastGoal === 'blue' ? 'GOAL!' : 'OWN GOAL';
+        bannerSpeedEl.textContent = `${Math.round(uu * 0.036)} km/h  ·  ${Math.round(uu)} uu/s`;
         bannerEl.style.color = game.lastGoal === 'blue' ? '#4aa3ff' : '#ff9a3c';
         bannerEl.style.display = 'block';
-        bannerUntil = now + 1800;
+        bannerUntil = now + 2500;
       }
     }
     if (bannerUntil && now > bannerUntil) {

@@ -114,15 +114,18 @@ export class Car {
   isFlipping = false;
   isAutoflipping = false;
   handbrakeVal = 0;
+  /** Player setting: stick magnitude needed for a dodge instead of a double jump (RL default 0.5). */
+  dodgeDeadzone = 0.5;
+  infiniteBoost: boolean;
 
   private ballCollider: RAPIER.Collider | null = null;
-  private readonly infiniteBoost: boolean;
   private readonly wheels: WheelState[] = WHEELS.map(() => ({
     contact: false,
     point: new Vector3(),
     normal: new Vector3(0, 1, 0),
     traceLen: 0,
   }));
+  private readonly preStepAngVel = new Vector3();
   private prevJump = false;
   private jumpTime = 0;
   private airTimeSinceJump = 0;
@@ -260,7 +263,30 @@ export class Car {
 
     this.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
     this.body.setAngvel({ x: angVel.x, y: angVel.y, z: angVel.z }, true);
+    this.preStepAngVel.copy(angVel);
     this.prevJump = input.jump;
+  }
+
+  /**
+   * Call right after the physics step. Rapier integrates gyroscopic precession for the box
+   * inertia, so a flip about a non-principal axis (any diagonal flip) tumbles and drifts the
+   * heading. Bullet, and therefore Rocket League, does not: torque-free angular velocity stays
+   * constant in world space. If nothing touched the car during the step, restore it.
+   */
+  postStep(): void {
+    let touched = false;
+    this.world.contactPairsWith(this.collider, (other) => {
+      if (touched) return;
+      this.world.contactPair(this.collider, other, (manifold) => {
+        for (let i = 0; i < manifold.numContacts(); i++) {
+          if (manifold.contactDist(i) <= 0.001) {
+            touched = true;
+            return;
+          }
+        }
+      });
+    });
+    if (!touched) this.body.setAngvel({ x: this.preStepAngVel.x, y: this.preStepAngVel.y, z: this.preStepAngVel.z }, true);
   }
 
   private readState(): void {
@@ -560,14 +586,16 @@ export class Car {
       this.airTimeSinceJump < CAR.doubleJumpMaxDelay;
     if (!canSecond) return;
 
-    // RL builds the dodge direction from (-pitch, yaw + roll) and zeroes tiny inputs.
+    // RL builds the dodge direction from (-pitch, yaw + roll). The player's dodge deadzone
+    // setting decides dodge vs double jump; RocketSim then zeroes tiny components.
     let df = -input.pitch;
     let ds = input.yaw + input.roll;
+    const stickMag = Math.hypot(df, ds);
     if (Math.abs(df) < CAR.flipDodgeDeadzone) df = 0;
     if (Math.abs(ds) < CAR.flipDodgeDeadzone) ds = 0;
     const mag = Math.hypot(df, ds);
 
-    if (mag === 0) {
+    if (mag === 0 || stickMag < this.dodgeDeadzone) {
       vel.addScaledVector(up, CAR.doubleJumpImpulse);
       this.hasDoubleJumped = true;
       return;
@@ -587,7 +615,13 @@ export class Car {
     vy *= (CAR.flipSideImpulseMaxSpeedScale - 1) * speedRatio + 1;
     if (backwards) vx *= CAR.flipBackwardImpulseScaleX;
 
-    vel.addScaledVector(forward, vx).addScaledVector(right, vy);
+    // [RS] The impulse uses the HORIZONTAL projections of forward and right (forwardDir2D), so a
+    // pitched car does not dodge into the ground or the sky.
+    const fwd2D = tmp.set(forward.x, 0, forward.z);
+    if (fwd2D.lengthSq() < 1e-6) fwd2D.set(right.z, 0, -right.x); // nose vertical: derive from right
+    fwd2D.normalize();
+    const right2D = tmp2.set(-fwd2D.z, 0, fwd2D.x); // fwd2D × up
+    vel.addScaledVector(fwd2D, vx).addScaledVector(right2D, vy);
 
     this.hasFlipped = true;
     this.isFlipping = true;
@@ -669,6 +703,7 @@ export class Car {
     if (!this.boosting && willBoost) this.boostingTime = 0;
     else if (this.boosting) this.boostingTime += dt;
     this.boosting = willBoost;
+    if (this.infiniteBoost) this.boost = CAR.boostMax;
     if (!this.boosting) return;
     const accel = this.grounded ? CAR.boostAccelGround : CAR.boostAccelAir;
     vel.addScaledVector(forward, accel * dt);

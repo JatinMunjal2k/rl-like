@@ -1,7 +1,8 @@
 import type { CarInput, FrameInput } from './types';
+import type { Settings } from '../settings';
 
-const DEADZONE = 0.12;
 const STORAGE_KEY = 'rl-like.bindings.v1';
+const NAV_STICK_THRESHOLD = 0.6;
 
 /** Rebindable actions. Steering / pitch axes are fixed (left stick, WASD / arrows). */
 export const ACTIONS = [
@@ -65,6 +66,9 @@ export const DEFAULT_BINDINGS: Bindings = {
   },
 };
 
+/** Menu navigation uses the standard layout regardless of bindings. */
+const NAV = { accept: 0, back: 1, up: 12, down: 13, left: 14, right: 15 };
+
 const GAMEPAD_BUTTON_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'LS', 'RS', 'D-Up', 'D-Down', 'D-Left', 'D-Right', 'Home'];
 
 export function gamepadButtonName(index: number): string {
@@ -101,12 +105,6 @@ export function saveBindings(b: Bindings): void {
 
 export type Captured = { kind: 'gamepad'; button: number } | { kind: 'key'; code: string };
 
-function deadzone(v: number): number {
-  const a = Math.abs(v);
-  if (a < DEADZONE) return 0;
-  return Math.sign(v) * Math.min(1, (a - DEADZONE) / (1 - DEADZONE));
-}
-
 function pressed(gp: Gamepad, i: number): boolean {
   const b = gp.buttons[i];
   return !!b && (b.pressed || b.value > 0.5);
@@ -119,8 +117,8 @@ function value(gp: Gamepad, i: number): number {
 }
 
 /**
- * Reads keyboard and the first connected gamepad every frame and produces one CarInput.
- * Gamepad wins over keyboard when it is connected and any control is active.
+ * Reads keyboard and the first connected gamepad every frame and produces one CarInput plus
+ * menu navigation. Gamepad wins over keyboard when it is connected and any control is active.
  */
 export class InputManager {
   bindings: Bindings = loadBindings();
@@ -131,12 +129,15 @@ export class InputManager {
   private prevReset = false;
   private prevToggleCam = false;
   private prevMenu = false;
+  private prevAccept = false;
+  private prevBack = false;
   private prevButtons: boolean[] = [];
   private capture: ((c: Captured) => void) | null = null;
+  private blockJump = false;
 
   onControllerChange: ((name: string | null) => void) | null = null;
 
-  constructor() {
+  constructor(private readonly settings: Settings) {
     window.addEventListener('keydown', (e) => {
       if (this.capture) {
         e.preventDefault();
@@ -175,6 +176,11 @@ export class InputManager {
     return this.capture !== null;
   }
 
+  /** Ignore the jump button until it is released, so the press that closed the menu does not jump. */
+  blockJumpUntilRelease(): void {
+    this.blockJump = true;
+  }
+
   private finishCapture(c: Captured): void {
     const cb = this.capture;
     this.capture = null;
@@ -211,11 +217,19 @@ export class InputManager {
     return null;
   }
 
+  /** Radial deadzone with rescaling, then sensitivity, clamped to ±1. */
+  private stick(raw: number, sensitivity: number): number {
+    const dz = this.settings.controls.deadzone;
+    const a = Math.abs(raw);
+    if (a < dz) return 0;
+    const scaled = ((a - dz) / (1 - dz)) * sensitivity;
+    return Math.sign(raw) * Math.min(1, scaled);
+  }
+
   poll(): FrameInput {
     const gp = this.currentGamepad();
 
     if (gp) {
-      // Edge detection for capture.
       const now = gp.buttons.map((_, i) => pressed(gp, i));
       if (this.capture) {
         for (let i = 0; i < now.length; i++) {
@@ -231,7 +245,11 @@ export class InputManager {
 
     const kb = this.readKeyboard();
     const pad = gp ? this.readGamepad(gp) : null;
-    const car: CarInput = this.capture ? { ...kb, ...zeroed() } : pad && isActive(pad) ? pad : kb;
+    const car: CarInput = this.capture ? zeroed() : pad && isActive(pad) ? pad : kb;
+    if (this.blockJump) {
+      if (!car.jump) this.blockJump = false;
+      car.jump = false;
+    }
 
     const g = this.bindings.gamepad;
     const k = this.bindings.keyboard;
@@ -240,6 +258,16 @@ export class InputManager {
     const reset = !this.capture && (key(k.reset) || (!!gp && pressed(gp, g.reset)));
     const toggleCam = !this.capture && (key(k.ballCam) || (!!gp && pressed(gp, g.ballCam)));
     const menu = !this.capture && (key(k.menu) || (!!gp && pressed(gp, g.menu)));
+
+    // Menu navigation: D-pad or left stick, A / Enter accepts, B / Backspace goes back.
+    const ax = gp ? (gp.axes[0] ?? 0) : 0;
+    const ay = gp ? (gp.axes[1] ?? 0) : 0;
+    const upHeld = key('ArrowUp') || (!!gp && (pressed(gp, NAV.up) || ay < -NAV_STICK_THRESHOLD));
+    const downHeld = key('ArrowDown') || (!!gp && (pressed(gp, NAV.down) || ay > NAV_STICK_THRESHOLD));
+    const leftHeld = key('ArrowLeft') || (!!gp && (pressed(gp, NAV.left) || ax < -NAV_STICK_THRESHOLD));
+    const rightHeld = key('ArrowRight') || (!!gp && (pressed(gp, NAV.right) || ax > NAV_STICK_THRESHOLD));
+    const accept = !this.capture && (key('Enter') || (!!gp && pressed(gp, NAV.accept)));
+    const back = !this.capture && (key('Backspace') || (!!gp && pressed(gp, NAV.back)));
     this.tapped.clear();
 
     const frame: FrameInput = {
@@ -248,25 +276,37 @@ export class InputManager {
       toggleCameraPressed: toggleCam && !this.prevToggleCam,
       menuPressed: menu && !this.prevMenu,
       controllerName: gp?.id ?? null,
+      nav: {
+        upHeld,
+        downHeld,
+        leftHeld,
+        rightHeld,
+        accept: accept && !this.prevAccept,
+        back: back && !this.prevBack,
+      },
     };
     this.prevReset = reset;
     this.prevToggleCam = toggleCam;
     this.prevMenu = menu;
+    this.prevAccept = accept;
+    this.prevBack = back;
     return frame;
   }
 
   private readGamepad(gp: Gamepad): CarInput {
     const g = this.bindings.gamepad;
-    const lx = deadzone(gp.axes[0] ?? 0);
-    const ly = deadzone(gp.axes[1] ?? 0);
+    const c = this.settings.controls;
+    const lxSteer = this.stick(gp.axes[0] ?? 0, c.steeringSensitivity);
+    const lxAir = this.stick(gp.axes[0] ?? 0, c.aerialSensitivity);
+    const lyAir = this.stick(gp.axes[1] ?? 0, c.aerialSensitivity);
     const handbrake = pressed(gp, g.handbrake);
     const rollButtons = (pressed(gp, g.airRollRight) ? 1 : 0) - (pressed(gp, g.airRollLeft) ? 1 : 0);
     return {
       throttle: clamp(value(gp, g.throttle) - value(gp, g.reverse)),
-      steer: lx,
-      pitch: ly, // stick back (positive) = nose up
-      yaw: handbrake ? 0 : lx,
-      roll: handbrake ? lx : rollButtons,
+      steer: lxSteer,
+      pitch: lyAir, // stick back (positive) = nose up
+      yaw: handbrake ? 0 : lxAir,
+      roll: handbrake ? lxAir : rollButtons,
       jump: pressed(gp, g.jump),
       boost: pressed(gp, g.boost),
       handbrake,

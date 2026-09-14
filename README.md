@@ -69,11 +69,17 @@ The car follows RocketSim's reverse-engineered vehicle:
 - Car-ball restitution ends at 0.18 (RL 0.0); friction is exact (2.0).
 - Arena ramps are quarter circles of 256 uu (floor) and 200 uu (ceiling) built from flat segments; RL's mesh is hand-modelled and not distributable. Unknown and omitted: the blend between corner walls and side/back walls, rounded goal posts and crossbar.
 
+## Match flow and HUD
+
+- 34 boost pads at RL's positions with RL's pickup volumes (cylinder 208/144 uu radius, 95 uu tall, or box 160/120 uu, 64 uu tall), 100 / 12 boost, 10 s / 4 s cooldown. Boost starts at 33 at kickoff.
+- Kickoffs cycle through RL's five blue spawn points in a shuffled order that changes every cycle; reset does the same.
+- On a goal the ball freezes and disappears for 2 s, then kickoff.
+- HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red and pulses while supersonic; the boost flame goes white.
+
 ## Physics still missing compared to Rocket League
 
-1. Boost pads (positions and cooldowns are in `rl.ts`; boost is infinite).
-2. Car-car bumps and demolitions.
-3. Kickoff countdown, all five kickoff spawns, respawns.
-4. Exact arena mesh details above.
-5. Supersonic has no gameplay effect beyond a flag (in RL it matters for demos).
-6. RocketSim itself compiled to WebAssembly would replace `sim/` for tick-exact physics.
+1. Car-car bumps and demolitions.
+2. Kickoff countdown and respawn positions.
+3. Exact arena mesh details above.
+4. Supersonic has no gameplay effect beyond the indicator (in RL it matters for demos).
+5. RocketSim itself compiled to WebAssembly would replace `sim/` for tick-exact physics.

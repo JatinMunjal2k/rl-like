@@ -212,6 +212,7 @@ export const CAR = {
   boostAccelGround: (2975 / 3) * UU, // = 991.667
   boostAccelAir: (3175 / 3) * UU, // = 1058.333
   boostMax: 100,
+  boostSpawnAmount: 100 / 3, // BOOST_SPAWN_AMOUNT: boost at kickoff
   boostUsedPerSecond: 100 / 3,
   boostMinTime: 0.1, // once started, boost stays on at least this long
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { ARENA, BALL } from '../sim/rl';
 import { HITBOX_HALF, HITBOX_OFFSET } from '../sim/car';
 import type { ArenaGeometry } from '../sim/arena';
-import type { BodyState } from '../sim/game';
+import type { BodyState, BoostPad } from '../sim/game';
 
 const pA = new THREE.Vector3();
 const pB = new THREE.Vector3();
@@ -21,8 +21,13 @@ export class Renderer {
   readonly carGroup = new THREE.Group();
   readonly ballMesh: THREE.Mesh;
   private readonly boostFlame: THREE.Mesh;
+  private readonly flameMaterial: THREE.MeshBasicMaterial;
+  private padMeshes: THREE.Mesh[] = [];
+  private readonly padActiveBig = new THREE.MeshBasicMaterial({ color: 0xffb347 });
+  private readonly padActiveSmall = new THREE.MeshBasicMaterial({ color: 0xffd98a });
+  private readonly padInactive = new THREE.MeshBasicMaterial({ color: 0x2a3a2a });
 
-  constructor(container: HTMLElement, arena: ArenaGeometry) {
+  constructor(container: HTMLElement, arena: ArenaGeometry, pads: BoostPad[]) {
     this.gl = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'low-power' });
     this.gl.setPixelRatio(1);
     this.gl.setSize(container.clientWidth, container.clientHeight);
@@ -38,10 +43,32 @@ export class Renderer {
     this.scene.add(sun);
 
     this.buildArena(arena);
+    this.buildPads(pads);
     this.boostFlame = this.buildCar();
+    this.flameMaterial = this.boostFlame.material as THREE.MeshBasicMaterial;
     this.ballMesh = this.buildBall();
 
     window.addEventListener('resize', () => this.resize(container));
+  }
+
+  /** Flat discs on the floor: lit when available, dark while cooling down. */
+  private buildPads(pads: BoostPad[]): void {
+    const bigGeo = new THREE.CircleGeometry(1.6, 24);
+    const smallGeo = new THREE.CircleGeometry(0.9, 16);
+    this.padMeshes = pads.map((p) => {
+      const mesh = new THREE.Mesh(p.big ? bigGeo : smallGeo, p.big ? this.padActiveBig : this.padActiveSmall);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(p.x, 0.02, p.z);
+      this.scene.add(mesh);
+      return mesh;
+    });
+  }
+
+  syncPads(pads: BoostPad[]): void {
+    for (let i = 0; i < pads.length; i++) {
+      const p = pads[i];
+      this.padMeshes[i].material = p.cooldown > 0 ? this.padInactive : p.big ? this.padActiveBig : this.padActiveSmall;
+    }
   }
 
   resize(container: HTMLElement): void {
@@ -52,10 +79,23 @@ export class Renderer {
     this.camera.updateProjectionMatrix();
   }
 
-  sync(prevCar: BodyState, currCar: BodyState, prevBall: BodyState, currBall: BodyState, alpha: number, boosting: boolean): void {
+  sync(
+    prevCar: BodyState,
+    currCar: BodyState,
+    prevBall: BodyState,
+    currBall: BodyState,
+    alpha: number,
+    boosting: boolean,
+    supersonic: boolean,
+    ballVisible: boolean,
+  ): void {
     applyInterpolated(this.carGroup, prevCar, currCar, alpha);
     applyInterpolated(this.ballMesh, prevBall, currBall, alpha);
+    this.ballMesh.visible = ballVisible;
     this.boostFlame.visible = boosting;
+    // Supersonic: the flame turns white-hot and grows.
+    this.flameMaterial.color.setHex(supersonic ? 0xfff3d6 : 0xffa62b);
+    this.boostFlame.scale.setScalar(supersonic ? 1.5 : 1);
   }
 
   render(): void {

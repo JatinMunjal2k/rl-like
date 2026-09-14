@@ -11,10 +11,30 @@
       #hud { position: fixed; inset: 0; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
       #score { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 28px; font-weight: 700; letter-spacing: 1px; }
       #score .blue { color: #4aa3ff; } #score .orange { color: #ff9a3c; }
-      #status { position: absolute; left: 14px; bottom: 14px; font-size: 13px; line-height: 1.5; opacity: .9; max-width: 520px; }
-      #status .ok { color: #7CFC9A; } #status .warn { color: #ffd166; }
+      #fps { position: absolute; top: 12px; right: 16px; font-size: 13px; opacity: .7; font-variant-numeric: tabular-nums; }
       #banner { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); font-size: 56px; font-weight: 800; display: none; }
-      kbd { background: rgba(255,255,255,.12); border-radius: 3px; padding: 0 4px; font-family: inherit; }
+
+      #bottomleft { position: absolute; left: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+      #camMode { font-size: 15px; font-weight: 700; letter-spacing: 1.5px; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,.25); background: rgba(0,0,0,.35); opacity: .55; }
+      #camMode.on { opacity: 1; border-color: #7CFC9A; color: #7CFC9A; }
+      #controller { font-size: 12px; opacity: .75; }
+      #controller .ok { color: #7CFC9A; } #controller .warn { color: #ffd166; }
+
+      #bottomright { position: absolute; right: 22px; bottom: 16px; display: flex; align-items: flex-end; gap: 18px; }
+      #speed { text-align: right; font-variant-numeric: tabular-nums; margin-bottom: 14px; }
+      #speed .value { font-size: 34px; font-weight: 800; line-height: 1; }
+      #speed .unit { font-size: 12px; opacity: .7; letter-spacing: 1px; }
+      #speed.supersonic .value { color: #ff4d4d; animation: pulse .5s ease-in-out infinite alternate; }
+      #speed.supersonic .unit { color: #ff4d4d; opacity: 1; }
+      @keyframes pulse { from { text-shadow: 0 0 4px rgba(255,77,77,.4); } to { text-shadow: 0 0 16px rgba(255,77,77,.95); } }
+      #boostGauge { width: 132px; height: 132px; position: relative; }
+      #boostGauge svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+      #boostGauge .track { fill: none; stroke: rgba(255,255,255,.14); stroke-width: 12; }
+      #boostGauge .fill { fill: none; stroke: #ffb347; stroke-width: 12; stroke-linecap: round; transition: stroke-dashoffset .06s linear; }
+      #boostGauge .fill.boosting { stroke: #ffd98a; }
+      #boostGauge .fill.empty { stroke: #ff6b6b; }
+      #boostValue { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      #boostLabel { position: absolute; left: 0; right: 0; bottom: 26px; text-align: center; font-size: 11px; letter-spacing: 2px; opacity: .7; }
 
       .menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(6, 10, 18, .78); z-index: 10; }
       .menu[hidden] { display: none; }
@@ -38,8 +58,23 @@
     <div id="app"></div>
     <div id="hud">
       <div id="score"><span class="blue">BLUE 0</span> &nbsp;–&nbsp; <span class="orange">0 ORANGE</span></div>
+      <div id="fps">— fps</div>
       <div id="banner"></div>
-      <div id="status">Loading…</div>
+      <div id="bottomleft">
+        <div id="camMode" class="on">BALL CAM</div>
+        <div id="controller">Loading…</div>
+      </div>
+      <div id="bottomright">
+        <div id="speed"><div class="value">0</div><div class="unit">UU/S</div></div>
+        <div id="boostGauge">
+          <svg viewBox="0 0 132 132">
+            <circle class="track" cx="66" cy="66" r="56" />
+            <circle id="boostFill" class="fill" cx="66" cy="66" r="56" />
+          </svg>
+          <div id="boostValue">33</div>
+          <div id="boostLabel">BOOST</div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

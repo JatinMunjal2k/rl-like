@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Quaternion, Vector3 } from 'three';
-import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, GRAVITY, KICKOFF_SPAWNS, TICK_DT, UU, curve } from './rl';
+import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, BOOST_PADS, CAR, GRAVITY, KICKOFF_SPAWNS, TICK_DT, UU, curve } from './rl';
 import { TUNING } from './tuning';
 import { allColliderBoxes, buildArenaGeometry, type ArenaGeometry } from './arena';
 import { Car } from './car';
@@ -25,6 +25,15 @@ export interface Snapshot {
 
 export type Team = 'blue' | 'orange';
 
+export interface BoostPad {
+  x: number;
+  y: number;
+  z: number;
+  big: boolean;
+  /** Seconds until the pad is available again; 0 = active. */
+  cooldown: number;
+}
+
 function emptyState(): BodyState {
   return { px: 0, py: 0, pz: 0, qx: 0, qy: 0, qz: 0, qw: 1 };
 }
@@ -48,8 +57,8 @@ const carFwd = new Vector3();
 const carRot = new Quaternion();
 
 /**
- * The whole match simulation: arena, one car, one ball, goal detection. Deterministic,
- * fixed-tick, no rendering concerns. The same class can later run headless on a server.
+ * The whole match simulation: arena, one car, one ball, boost pads, goal detection.
+ * Deterministic, fixed-tick, no rendering concerns. The same class can later run headless on a server.
  */
 export class Game {
   readonly world: RAPIER.World;
@@ -57,17 +66,23 @@ export class Game {
   readonly car: Car;
   readonly ball: RAPIER.RigidBody;
   readonly ballCollider: RAPIER.Collider;
+  readonly pads: BoostPad[];
 
   tick = 0;
   score: Record<Team, number> = { blue: 0, orange: 0 };
   lastGoal: Team | null = null;
-  /** Seconds left in the post-goal freeze before kickoff. */
+  /** Seconds left in the post-goal freeze before kickoff. The ball is hidden and frozen meanwhile. */
   goalPause = 0;
   /** True on ticks where the car touched the ball. */
   ballTouched = false;
+  /** Index into KICKOFF_SPAWNS used for the current kickoff. */
+  currentSpawn = 4;
 
   readonly prev: Snapshot = { tick: 0, car: emptyState(), ball: emptyState() };
   readonly curr: Snapshot = { tick: 0, car: emptyState(), ball: emptyState() };
+
+  private spawnOrder: number[] = [];
+  private spawnCursor = 0;
 
   static async create(): Promise<Game> {
     await RAPIER.init();
@@ -80,11 +95,16 @@ export class Game {
     this.arena = buildArenaGeometry();
     this.buildArenaColliders();
     [this.ball, this.ballCollider] = this.buildBall();
-    this.car = new Car(this.world, { infiniteBoost: true });
+    this.car = new Car(this.world, { infiniteBoost: false });
     this.car.setBallCollider(this.ballCollider);
+    this.pads = buildPads();
     this.resetKickoff();
     this.capture(this.curr);
     Object.assign(this.prev, structuredClone(this.curr));
+  }
+
+  get ballVisible(): boolean {
+    return this.goalPause === 0;
   }
 
   step(input: CarInput, dt: number = TICK_DT): void {
@@ -106,24 +126,35 @@ export class Game {
     this.world.step();
     this.tick++;
 
-    this.applyCarBallExtraImpulse();
-    this.clampBall();
+    this.updatePads(dt);
+    if (this.goalPause === 0) {
+      this.applyCarBallExtraImpulse();
+      this.clampBall();
+    } else {
+      this.ballTouched = false;
+    }
     this.capture(this.curr);
 
     if (this.goalPause === 0) this.checkGoal();
   }
 
+  /** Kickoff at the next spawn in the shuffled order; a new shuffle every five kickoffs. */
   resetKickoff(): void {
-    // Centre kickoff spot. RL frame: x right, y toward orange. Ours: x right, z toward orange.
-    const [sx, sy, yawRL] = KICKOFF_SPAWNS[4];
+    if (this.spawnCursor >= this.spawnOrder.length) this.reshuffleSpawns();
+    this.currentSpawn = this.spawnOrder[this.spawnCursor++];
+    const [sx, sy, yawRL] = KICKOFF_SPAWNS[this.currentSpawn];
     // RL yaw is measured from +x toward +y (our +z). Our car faces -Z at yaw 0 and a rotation ψ
     // about +Y sends (0,0,-1) to (-sin ψ, 0, -cos ψ), so solve for the RL heading (cos θ, sin θ).
     const yaw = Math.atan2(-Math.cos(yawRL), -Math.sin(yawRL));
     this.car.reset(sx * UU, sy * UU, yaw);
+
+    this.ball.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
     this.ball.setTranslation({ x: 0, y: BALL.restZ, z: 0 }, true);
     this.ball.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
+
+    for (const p of this.pads) p.cooldown = 0;
   }
 
   /** Full reset including score. */
@@ -132,6 +163,20 @@ export class Game {
     this.lastGoal = null;
     this.goalPause = 0;
     this.resetKickoff();
+  }
+
+  private reshuffleSpawns(): void {
+    const previous = this.spawnOrder;
+    let next: number[];
+    do {
+      next = KICKOFF_SPAWNS.map((_, i) => i);
+      for (let i = next.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [next[i], next[j]] = [next[j], next[i]];
+      }
+    } while (previous.length > 0 && next.every((v, i) => v === previous[i]));
+    this.spawnOrder = next;
+    this.spawnCursor = 0;
   }
 
   private capture(into: Snapshot): void {
@@ -151,6 +196,37 @@ export class Game {
     this.score[team]++;
     this.lastGoal = team;
     this.goalPause = TUNING.goalResetDelay;
+    // RL explodes the ball; we freeze and hide it until kickoff.
+    this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.ball.setBodyType(RAPIER.RigidBodyType.Fixed, true);
+  }
+
+  /**
+   * [RS] BoostPad: a pad is collected when the car origin is inside its cylinder
+   * (radius 208/144, height 95) or its box (half-width 160/120, height 64), then it cools down
+   * for 10 s (big) or 4 s (small). Collected even at full boost.
+   */
+  private updatePads(dt: number): void {
+    const c = this.curr.car;
+    const t = this.car.body.translation();
+    void c;
+    for (const p of this.pads) {
+      if (p.cooldown > 0) {
+        p.cooldown = Math.max(0, p.cooldown - dt);
+        continue;
+      }
+      const dx = t.x - p.x;
+      const dz = t.z - p.z;
+      const dy = t.y - p.y;
+      const cylRad = p.big ? BOOST_PADS.cylinderRadiusBig : BOOST_PADS.cylinderRadiusSmall;
+      const boxRad = p.big ? BOOST_PADS.boxRadiusBig : BOOST_PADS.boxRadiusSmall;
+      const inCyl = dy >= -p.y && dy <= BOOST_PADS.cylinderHeight && dx * dx + dz * dz <= cylRad * cylRad;
+      const inBox = dy >= -p.y && dy <= BOOST_PADS.boxHeight && Math.abs(dx) <= boxRad && Math.abs(dz) <= boxRad;
+      if (!inCyl && !inBox) continue;
+      this.car.boost = Math.min(CAR.boostMax, this.car.boost + (p.big ? BOOST_PADS.bigAmount : BOOST_PADS.smallAmount));
+      p.cooldown = p.big ? BOOST_PADS.bigCooldown : BOOST_PADS.smallCooldown;
+    }
   }
 
   /**
@@ -250,4 +326,12 @@ export class Game {
       this.world.createCollider(material(desc), ground);
     }
   }
+}
+
+/** RL frame [x, y] with y the long axis -> our (x, z). Pad heights 73 uu (big) / 70 uu (small). */
+function buildPads(): BoostPad[] {
+  const pads: BoostPad[] = [];
+  for (const [x, y] of BOOST_PADS.bigLocations) pads.push({ x: x * UU, y: 73 * UU, z: y * UU, big: true, cooldown: 0 });
+  for (const [x, y] of BOOST_PADS.smallLocations) pads.push({ x: x * UU, y: 70 * UU, z: y * UU, big: false, cooldown: 0 });
+  return pads;
 }

@@ -1,41 +1,43 @@
 import { Game } from './sim/game';
-import { TICK_DT } from './sim/rl';
+import { CAR, TICK_DT, UU } from './sim/rl';
 import { Renderer } from './render/renderer';
 import { FollowCamera } from './render/camera';
-import { InputManager, gamepadButtonName, keyName, type Bindings } from './input/input';
+import { InputManager } from './input/input';
 import { Menu } from './ui/menu';
 
 const app = document.getElementById('app')!;
-const statusEl = document.getElementById('status')!;
 const scoreEl = document.getElementById('score')!;
 const bannerEl = document.getElementById('banner')!;
+const fpsEl = document.getElementById('fps')!;
+const camModeEl = document.getElementById('camMode')!;
+const controllerEl = document.getElementById('controller')!;
+const speedEl = document.getElementById('speed')!;
+const speedValueEl = speedEl.querySelector('.value')!;
+const boostFillEl = document.getElementById('boostFill') as unknown as SVGCircleElement;
+const boostValueEl = document.getElementById('boostValue')!;
 
-function setStatus(controller: string | null, ballCam: boolean, b: Bindings): void {
-  const g = b.gamepad;
-  const k = b.keyboard;
-  const pad = controller
-    ? `<span class="ok">Controller: ${escapeHtml(controller)}</span>`
-    : `<span class="warn">No controller detected.</span> Plug one in and press any button.`;
-  const gp = (a: keyof Bindings['gamepad']) => escapeHtml(gamepadButtonName(g[a]));
-  const kb = (a: keyof Bindings['keyboard']) => `<kbd>${escapeHtml(keyName(k[a]))}</kbd>`;
-  statusEl.innerHTML =
-    `${pad}<br>` +
-    `Gamepad: ${gp('throttle')} throttle · ${gp('reverse')} reverse · ${gp('jump')} jump · ${gp('boost')} boost · ` +
-    `${gp('handbrake')} powerslide / air roll · ${gp('airRollLeft')}/${gp('airRollRight')} air roll · ${gp('ballCam')} ball cam · ` +
-    `${gp('reset')} reset · ${gp('menu')} menu<br>` +
-    `Keyboard: ${kb('throttle')}${kb('reverse')} + <kbd>A</kbd><kbd>D</kbd> drive · ${kb('jump')} jump · ${kb('boost')} boost · ` +
-    `${kb('handbrake')} powerslide · ${kb('airRollLeft')}/${kb('airRollRight')} air roll · ${kb('ballCam')} ball cam · ${kb('reset')} reset · ${kb('menu')} menu<br>` +
-    `Camera: ${ballCam ? 'ball cam' : 'car cam'}`;
-}
+const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 56;
+boostFillEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
 }
 
+function setController(name: string | null): void {
+  controllerEl.innerHTML = name
+    ? `<span class="ok">Controller: ${escapeHtml(name)}</span>`
+    : `<span class="warn">No controller.</span> Press a button on your controller, or use the keyboard.`;
+}
+
+function setCamMode(ballCam: boolean): void {
+  camModeEl.textContent = ballCam ? 'BALL CAM' : 'CAR CAM';
+  camModeEl.classList.toggle('on', ballCam);
+}
+
 async function main(): Promise<void> {
-  statusEl.textContent = 'Loading physics…';
+  controllerEl.textContent = 'Loading physics…';
   const game = await Game.create();
-  const renderer = new Renderer(app, game.arena);
+  const renderer = new Renderer(app, game.arena, game.pads);
   const followCam = new FollowCamera();
   const input = new InputManager();
   const menu = new Menu(document.body, input);
@@ -45,22 +47,26 @@ async function main(): Promise<void> {
   (window as unknown as { __game: Game; __input: InputManager }).__input = input;
 
   let controllerName: string | null = null;
-  const refreshStatus = () => setStatus(controllerName, followCam.ballCam, input.bindings);
   input.onControllerChange = (name) => {
     controllerName = name;
-    refreshStatus();
+    setController(name);
   };
-  menu.onBindingsChanged = refreshStatus;
   menu.onPlay = () => {
     last = performance.now();
     accumulator = 0;
   };
-  refreshStatus();
+  setController(null);
+  setCamMode(followCam.ballCam);
 
   let lastScore = '';
   let bannerUntil = 0;
   let last = performance.now();
   let accumulator = 0;
+  let fpsFrames = 0;
+  let fpsWindowStart = performance.now();
+  let lastSpeedUU = -1;
+  let lastBoost = -1;
+  let lastBoostState = '';
 
   const frame = (now: number): void => {
     const frameDt = Math.min((now - last) / 1000, 0.1);
@@ -69,7 +75,7 @@ async function main(): Promise<void> {
     const fi = input.poll();
     if (fi.controllerName !== controllerName) {
       controllerName = fi.controllerName;
-      refreshStatus();
+      setController(controllerName);
     }
     if (fi.menuPressed) menu.toggle();
 
@@ -78,7 +84,7 @@ async function main(): Promise<void> {
       if (fi.resetPressed) game.resetMatch();
       if (fi.toggleCameraPressed) {
         followCam.toggle();
-        refreshStatus();
+        setCamMode(followCam.ballCam);
       }
 
       // Fixed-step simulation; render interpolates between the last two ticks.
@@ -92,9 +98,38 @@ async function main(): Promise<void> {
     }
     const alpha = Math.min(1, accumulator / TICK_DT);
 
-    renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.car.boosting);
+    renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.car.boosting, game.car.supersonic, game.ballVisible);
+    renderer.syncPads(game.pads);
     followCam.update(renderer.camera, renderer.carGroup, renderer.ballMesh, frameDt);
     renderer.render();
+
+    // --- HUD ---------------------------------------------------------------------
+    const lv = game.car.body.linvel();
+    const speedUU = Math.round(Math.hypot(lv.x, lv.y, lv.z) / UU / 10) * 10;
+    if (speedUU !== lastSpeedUU) {
+      lastSpeedUU = speedUU;
+      speedValueEl.textContent = String(speedUU);
+    }
+    speedEl.classList.toggle('supersonic', game.car.supersonic);
+
+    const boost = Math.round(game.car.boost);
+    if (boost !== lastBoost) {
+      lastBoost = boost;
+      boostValueEl.textContent = String(boost);
+      boostFillEl.style.strokeDashoffset = `${GAUGE_CIRCUMFERENCE * (1 - boost / CAR.boostMax)}`;
+    }
+    const boostState = game.car.boosting ? 'boosting' : boost === 0 ? 'empty' : '';
+    if (boostState !== lastBoostState) {
+      lastBoostState = boostState;
+      boostFillEl.setAttribute('class', `fill ${boostState}`);
+    }
+
+    fpsFrames++;
+    if (now - fpsWindowStart >= 500) {
+      fpsEl.textContent = `${Math.round((fpsFrames * 1000) / (now - fpsWindowStart))} fps`;
+      fpsFrames = 0;
+      fpsWindowStart = now;
+    }
 
     const scoreText = `${game.score.blue}-${game.score.orange}`;
     if (scoreText !== lastScore) {
@@ -119,5 +154,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error(err);
-  statusEl.innerHTML = `<span class="warn">Failed to start: ${escapeHtml(String(err))}</span>`;
+  controllerEl.innerHTML = `<span class="warn">Failed to start: ${escapeHtml(String(err))}</span>`;
 });

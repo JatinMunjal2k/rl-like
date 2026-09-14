@@ -1,5 +1,8 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { ARENA, BALL, GRAVITY, KICKOFF, TICK_DT } from './constants';
+import { Quaternion, Vector3 } from 'three';
+import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, GRAVITY, KICKOFF_SPAWNS, TICK_DT, UU, curve } from './rl';
+import { TUNING } from './tuning';
+import { allColliderBoxes, buildArenaGeometry, type ArenaGeometry } from './arena';
 import { Car } from './car';
 import { EMPTY_INPUT, type CarInput } from '../input/types';
 
@@ -38,20 +41,30 @@ function readBody(body: RAPIER.RigidBody, out: BodyState): void {
   out.qw = r.w;
 }
 
+// Scratch vectors for the car-ball impulse.
+const relVel = new Vector3();
+const hitDir = new Vector3();
+const carFwd = new Vector3();
+const carRot = new Quaternion();
+
 /**
  * The whole match simulation: arena, one car, one ball, goal detection. Deterministic,
- * fixed-tick, no rendering concerns. Designed so the same class can later run headless on a server.
+ * fixed-tick, no rendering concerns. The same class can later run headless on a server.
  */
 export class Game {
   readonly world: RAPIER.World;
+  readonly arena: ArenaGeometry;
   readonly car: Car;
   readonly ball: RAPIER.RigidBody;
+  readonly ballCollider: RAPIER.Collider;
 
   tick = 0;
   score: Record<Team, number> = { blue: 0, orange: 0 };
   lastGoal: Team | null = null;
   /** Seconds left in the post-goal freeze before kickoff. */
   goalPause = 0;
+  /** True on ticks where the car touched the ball. */
+  ballTouched = false;
 
   readonly prev: Snapshot = { tick: 0, car: emptyState(), ball: emptyState() };
   readonly curr: Snapshot = { tick: 0, car: emptyState(), ball: emptyState() };
@@ -64,9 +77,10 @@ export class Game {
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
     this.world.timestep = TICK_DT;
-    this.buildArena();
-    this.ball = this.buildBall();
-    this.car = new Car(this.world);
+    this.arena = buildArenaGeometry();
+    this.buildArenaColliders();
+    [this.ball, this.ballCollider] = this.buildBall();
+    this.car = new Car(this.world, { infiniteBoost: true });
     this.resetKickoff();
     this.capture(this.curr);
     Object.assign(this.prev, structuredClone(this.curr));
@@ -90,16 +104,22 @@ export class Game {
     this.car.tick(effective, dt);
     this.world.step();
     this.tick++;
+
+    this.applyCarBallExtraImpulse();
+    this.clampBall();
     this.capture(this.curr);
 
     if (this.goalPause === 0) this.checkGoal();
   }
 
   resetKickoff(): void {
-    const c = KICKOFF.car;
-    this.car.reset(c.x, c.y, c.z, c.yaw);
-    const b = KICKOFF.ball;
-    this.ball.setTranslation({ x: b.x, y: b.y, z: b.z }, true);
+    // Centre kickoff spot. RL frame: x right, y toward orange. Ours: x right, z toward orange.
+    const [sx, sy, yawRL] = KICKOFF_SPAWNS[4];
+    // RL yaw is measured from +x toward +y (our +z). Our car faces -Z at yaw 0 and a rotation ψ
+    // about +Y sends (0,0,-1) to (-sin ψ, 0, -cos ψ), so solve for the RL heading (cos θ, sin θ).
+    const yaw = Math.atan2(-Math.cos(yawRL), -Math.sin(yawRL));
+    this.car.reset(sx * UU, sy * UU, yaw);
+    this.ball.setTranslation({ x: 0, y: BALL.restZ, z: 0 }, true);
     this.ball.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
@@ -121,7 +141,7 @@ export class Game {
 
   private checkGoal(): void {
     const z = this.curr.ball.pz;
-    const line = ARENA.length / 2 + BALL.radius;
+    const line = ARENA.goalScoreThresholdY + BALL.radius;
     if (z > line) this.onGoal('blue');
     else if (z < -line) this.onGoal('orange');
   }
@@ -129,90 +149,101 @@ export class Game {
   private onGoal(team: Team): void {
     this.score[team]++;
     this.lastGoal = team;
-    this.goalPause = 2.0;
+    this.goalPause = TUNING.goalResetDelay;
   }
 
-  private buildBall(): RAPIER.RigidBody {
-    const b = KICKOFF.ball;
+  /**
+   * RL adds velocity to the ball on every tick a car touches it, on top of the rigid-body
+   * collision. See BALL_CAR_EXTRA_IMPULSE in rl.ts for the formula and source.
+   */
+  private applyCarBallExtraImpulse(): void {
+    let touching = false;
+    this.world.contactPair(this.car.collider, this.ballCollider, (manifold) => {
+      for (let i = 0; i < manifold.numContacts(); i++) {
+        if (manifold.contactDist(i) <= 0) {
+          touching = true;
+          return;
+        }
+      }
+    });
+    this.ballTouched = touching;
+    if (!touching) return;
+
+    const bv = this.ball.linvel();
+    const cv = this.car.body.linvel();
+    relVel.set(bv.x - cv.x, bv.y - cv.y, bv.z - cv.z);
+    const relSpeed = Math.min(relVel.length(), BALL_CAR_EXTRA_IMPULSE.maxDeltaVel);
+    if (relSpeed <= 0) return;
+
+    const bp = this.ball.translation();
+    const cp = this.car.body.translation();
+    hitDir.set(bp.x - cp.x, (bp.y - cp.y) * BALL_CAR_EXTRA_IMPULSE.zScale, bp.z - cp.z).normalize();
+
+    const cr = this.car.body.rotation();
+    carRot.set(cr.x, cr.y, cr.z, cr.w);
+    carFwd.set(0, 0, -1).applyQuaternion(carRot);
+    const along = hitDir.dot(carFwd) * (1 - BALL_CAR_EXTRA_IMPULSE.forwardScale);
+    hitDir.addScaledVector(carFwd, -along).normalize();
+
+    const factor = curve(BALL_CAR_EXTRA_IMPULSE.factorCurve, relSpeed / UU);
+    const add = relSpeed * factor;
+    this.ball.setLinvel({ x: bv.x + hitDir.x * add, y: bv.y + hitDir.y * add, z: bv.z + hitDir.z * add }, true);
+  }
+
+  private clampBall(): void {
+    const v = this.ball.linvel();
+    const s2 = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (s2 > BALL.maxSpeed * BALL.maxSpeed) {
+      const k = BALL.maxSpeed / Math.sqrt(s2);
+      this.ball.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true);
+    }
+    const w = this.ball.angvel();
+    const w2 = w.x * w.x + w.y * w.y + w.z * w.z;
+    if (w2 > BALL.maxAngularSpeed * BALL.maxAngularSpeed) {
+      const k = BALL.maxAngularSpeed / Math.sqrt(w2);
+      this.ball.setAngvel({ x: w.x * k, y: w.y * k, z: w.z * k }, true);
+    }
+  }
+
+  private buildBall(): [RAPIER.RigidBody, RAPIER.Collider] {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
-        .setTranslation(b.x, b.y, b.z)
-        .setLinearDamping(BALL.linearDamping)
-        .setAngularDamping(BALL.angularDamping)
+        .setTranslation(0, BALL.restZ, 0)
+        .setLinearDamping(BALL.drag)
+        .setAngularDamping(0)
         .setCcdEnabled(true)
         .setCanSleep(false),
     );
     const volume = (4 / 3) * Math.PI * BALL.radius ** 3;
-    this.world.createCollider(
+    // Combine rules are chosen so ball-arena = 0.6, car-arena = 0.3 (see tuning.ts for the car-ball compromise).
+    const collider = this.world.createCollider(
       RAPIER.ColliderDesc.ball(BALL.radius)
         .setDensity(BALL.mass / volume)
         .setRestitution(BALL.restitution)
-        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Max)
-        .setFriction(BALL.friction),
+        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Multiply)
+        .setFriction(BALL.friction)
+        .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min),
       body,
     );
-    return body;
+    return [body, collider];
   }
 
-  /** Static arena: floor, ceiling, side walls, end walls with goal openings, goal boxes, 45° corners. */
-  private buildArena(): void {
-    const A = ARENA;
-    const t = A.wallThickness;
-    const W = A.width;
-    const L = A.length;
-    const H = A.height;
-    const gw = A.goalWidth;
-    const gh = A.goalHeight;
-    const gd = A.goalDepth;
-
+  private buildArenaColliders(): void {
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-    const box = (hx: number, hy: number, hz: number, x: number, y: number, z: number, yaw = 0) => {
-      const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setFriction(0.6);
-      if (yaw !== 0) {
-        const s = Math.sin(yaw / 2);
-        const c = Math.cos(yaw / 2);
-        desc.setRotation({ x: 0, y: s, z: 0, w: c });
-      }
-      this.world.createCollider(desc, ground);
-    };
+    const material = (desc: RAPIER.ColliderDesc) =>
+      desc
+        .setFriction(ARENA.collisionFriction)
+        .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
+        .setRestitution(1.0) // multiplied by the ball's 0.6; the car uses Min with its own 0.3
+        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min);
 
-    // Floor and ceiling extend through the goals.
-    box(W / 2 + t, t / 2, L / 2 + gd + t, 0, -t / 2, 0);
-    box(W / 2 + t, t / 2, L / 2 + t, 0, H + t / 2, 0);
-
-    // Side walls.
-    box(t / 2, H / 2 + t, L / 2 + t, -(W / 2 + t / 2), H / 2, 0);
-    box(t / 2, H / 2 + t, L / 2 + t, W / 2 + t / 2, H / 2, 0);
-
-    for (const s of [-1, 1]) {
-      const zWall = s * (L / 2 + t / 2);
-      // End wall pieces beside the goal mouth.
-      const sideHalf = (W / 2 - gw / 2) / 2;
-      const sideCenter = gw / 2 + sideHalf;
-      box(sideHalf, H / 2 + t, t / 2, -sideCenter, H / 2, zWall);
-      box(sideHalf, H / 2 + t, t / 2, sideCenter, H / 2, zWall);
-      // Above the goal mouth.
-      box(gw / 2, (H - gh) / 2 + t, t / 2, 0, gh + (H - gh) / 2, zWall);
-
-      // Goal box.
-      const zGoalCenter = s * (L / 2 + gd / 2);
-      box(gw / 2 + t, gh / 2 + t, t / 2, 0, gh / 2, s * (L / 2 + gd + t / 2)); // back
-      box(t / 2, gh / 2 + t, gd / 2 + t, -(gw / 2 + t / 2), gh / 2, zGoalCenter); // left
-      box(t / 2, gh / 2 + t, gd / 2 + t, gw / 2 + t / 2, gh / 2, zGoalCenter); // right
-      box(gw / 2 + t, t / 2, gd / 2 + t, 0, gh + t / 2, zGoalCenter); // roof
-    }
-
-    // 45° corner walls.
-    const c = A.cornerCut;
-    const halfLen = c / Math.SQRT2;
-    for (const sx of [-1, 1]) {
-      for (const sz of [-1, 1]) {
-        const nx = sx / Math.SQRT2;
-        const nz = sz / Math.SQRT2;
-        const cx = sx * (W / 2 - c / 2) + nx * (t / 2);
-        const cz = sz * (L / 2 - c / 2) + nz * (t / 2);
-        box(halfLen, H / 2 + t, t / 2, cx, H / 2, cz, Math.atan2(sx, sz));
-      }
+    // ORIENTED: the shell's normals point into the arena, so deep penetrations still push inward.
+    const flags = RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES | RAPIER.TriMeshFlags.ORIENTED;
+    this.world.createCollider(material(RAPIER.ColliderDesc.trimesh(this.arena.vertices, this.arena.indices, flags)), ground);
+    for (const b of allColliderBoxes(this.arena)) {
+      const desc = RAPIER.ColliderDesc.cuboid(b.hx, b.hy, b.hz).setTranslation(b.x, b.y, b.z);
+      if (b.yaw) desc.setRotation({ x: 0, y: Math.sin(b.yaw / 2), z: 0, w: Math.cos(b.yaw / 2) });
+      this.world.createCollider(material(desc), ground);
     }
   }
 }

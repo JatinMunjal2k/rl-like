@@ -1,5 +1,5 @@
 import { Game } from './sim/game';
-import { TICK_DT } from './sim/constants';
+import { TICK_DT } from './sim/rl';
 import { Renderer } from './render/renderer';
 import { FollowCamera } from './render/camera';
 import { InputManager } from './input/input';
@@ -27,7 +27,7 @@ function escapeHtml(s: string): string {
 async function main(): Promise<void> {
   statusEl.textContent = 'Loading physics…';
   const game = await Game.create();
-  const renderer = new Renderer(app);
+  const renderer = new Renderer(app, game.arena);
   const followCam = new FollowCamera();
   const input = new InputManager();
   // Debug handle for the browser console.

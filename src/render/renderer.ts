@@ -1,11 +1,13 @@
 import * as THREE from 'three';
-import { ARENA, BALL, BOOST_PADS, CAR, OCTANE, UU, curve } from '../sim/rl';
+import { ARENA, BALL, BOOST_PADS, CAR, GRAVITY, OCTANE, UU, curve } from '../sim/rl';
 import { HITBOX_HALF, HITBOX_OFFSET } from '../sim/car';
 import type { ArenaGeometry } from '../sim/arena';
 import type { BodyState, BoostPad } from '../sim/game';
 import type { Team } from '../sim/car';
 import type { CarRenderState } from '../net/session';
 import { BlobShadow, Explosion, Ribbon, glowTexture } from './effects';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OCTANE as OCT } from '../sim/rl';
 
 const pA = new THREE.Vector3();
 const pB = new THREE.Vector3();
@@ -18,7 +20,7 @@ const TEAM_PAINT: Record<Team, number> = { blue: 0x1f63d8, orange: 0xf07f1a };
 interface CarVisual {
   group: THREE.Group;
   team: Team;
-  wheels: { pivot: THREE.Group; mesh: THREE.Mesh; radius: number; front: boolean }[];
+  wheels: { pivot: THREE.Group; mesh: THREE.Object3D; radius: number; front: boolean; restY: number }[];
   flame: THREE.Mesh;
   flameMaterial: THREE.MeshBasicMaterial;
   nameplate: THREE.Sprite | null;
@@ -50,7 +52,6 @@ export class Renderer {
   private readonly cars = new Map<number, CarVisual>();
   private pads: PadVisual[] = [];
   private bigOrbs!: THREE.InstancedMesh;
-  private smallOrbs!: THREE.InstancedMesh;
   private bigRings!: THREE.InstancedMesh;
   private smallRings!: THREE.InstancedMesh;
   private readonly padMatrix = new THREE.Matrix4();
@@ -64,6 +65,12 @@ export class Renderer {
   private readonly prevBallPos = new THREE.Vector3();
   private padTime = 0;
   private readonly tmpV = new THREE.Vector3();
+  /** Kenney car kit pieces (CC0), fitted to the Octane hitbox; null until loadAssets() resolves (box car meanwhile). */
+  private assets: { body: THREE.Mesh; wheel: THREE.Mesh; wheelRadius: number; bodyMaterial: Record<Team, THREE.Material> } | null = null;
+  private readonly landingRing: THREE.Mesh;
+  private readonly landingDisc: THREE.Mesh;
+  private readonly padPops: { sprite: THREE.Sprite; age: number }[] = [];
+  private prevPadCooldown: number[] = [];
 
   constructor(container: HTMLElement, arena: ArenaGeometry, pads: BoostPad[]) {
     this.gl = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'low-power' });
@@ -92,8 +99,69 @@ export class Renderer {
     this.scene.add(this.ballGlow);
     this.scene.add(this.ballTrail.mesh);
     this.scene.add(this.ballShadow.mesh);
+    // Landing marker: where the airborne ball will touch the floor (RL's ground indicator).
+    this.landingRing = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+    this.landingRing.rotation.x = -Math.PI / 2;
+    this.landingRing.renderOrder = 2;
+    this.landingRing.visible = false;
+    this.landingDisc = new THREE.Mesh(new THREE.CircleGeometry(0.86, 40), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, depthWrite: false }));
+    this.landingDisc.rotation.x = -Math.PI / 2;
+    this.landingDisc.renderOrder = 2;
+    this.landingDisc.visible = false;
+    this.scene.add(this.landingRing, this.landingDisc);
+    for (let i = 0; i < 6; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0xffd080, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.padPops.push({ sprite, age: 99 });
+    }
 
     window.addEventListener('resize', () => this.resize(container));
+  }
+
+  /**
+   * Load the Kenney car kit body and wheel (CC0). The kit paints everything from one palette
+   * texture, so the body's paint colour is found from the mesh's dominant UV cell and repainted
+   * per team into two derived textures. Failure leaves the procedural box car in place.
+   */
+  async loadAssets(): Promise<void> {
+    try {
+      const loader = new GLTFLoader();
+      const base = `${import.meta.env.BASE_URL}models/`;
+      const [car, wheel] = await Promise.all([loader.loadAsync(`${base}car.glb`), loader.loadAsync(`${base}wheel.glb`)]);
+      let body: THREE.Mesh | null = null;
+      car.scene.traverse((o) => {
+        if (!body && (o as THREE.Mesh).isMesh && o.name === 'body') body = o as THREE.Mesh;
+      });
+      let wheelMesh: THREE.Mesh | null = null;
+      wheel.scene.traverse((o) => {
+        if (!wheelMesh && (o as THREE.Mesh).isMesh) wheelMesh = o as THREE.Mesh;
+      });
+      if (!body || !wheelMesh) return;
+      const bodyMesh: THREE.Mesh = body;
+      const wm: THREE.Mesh = wheelMesh;
+      // Team materials from the palette.
+      const src = bodyMesh.material as THREE.MeshStandardMaterial;
+      const paintRgb = dominantTexel(bodyMesh.geometry, src.map);
+      const bodyMaterial = {} as Record<Team, THREE.Material>;
+      for (const team of ['blue', 'orange'] as Team[]) {
+        const map = paintRgb && src.map ? recolourPalette(src.map, paintRgb, TEAM_PAINT[team]) : src.map;
+        bodyMaterial[team] = new THREE.MeshLambertMaterial({ map: map ?? undefined, color: map ? 0xffffff : TEAM_PAINT[team] });
+      }
+      // Wheel: kit wheels are modelled with their axle along X, matching ours.
+      const wb = new THREE.Box3().setFromObject(wm);
+      const wheelRadius = (wb.max.y - wb.min.y) / 2;
+      wm.material = new THREE.MeshLambertMaterial({ map: src.map ?? undefined });
+      this.assets = { body: bodyMesh, wheel: wm, wheelRadius, bodyMaterial };
+      // Rebuild any cars already on screen with the new look.
+      for (const [id, v] of [...this.cars]) {
+        const team = v.team;
+        this.removeCar(id);
+        this.cars.set(id, this.buildCar(team));
+      }
+    } catch (err) {
+      console.warn('Car model unavailable, using the box car', err);
+    }
   }
 
   resize(container: HTMLElement): void {
@@ -137,9 +205,13 @@ export class Renderer {
       applyInterpolated(v.group, s.prev, s.curr, s.alpha);
       if (s.offsetPos) v.group.position.add(s.offsetPos);
       if (s.offsetQuat) v.group.quaternion.premultiply(s.offsetQuat);
-      for (const w of v.wheels) {
+      for (let i = 0; i < v.wheels.length; i++) {
+        const w = v.wheels[i];
         w.mesh.rotation.x -= (s.forwardSpeed / w.radius) * dt;
         if (w.front) w.pivot.rotation.y = -s.steer * steerAngleFor(s.forwardSpeed);
+        // Suspension: ease the wheel toward where the ray found the ground.
+        const targetY = s.wheelY ? s.wheelY[i] : w.restY;
+        w.pivot.position.y += (targetY - w.pivot.position.y) * Math.min(1, dt * 30);
       }
       v.flame.visible = s.boosting;
       v.flameMaterial.color.setHex(s.supersonic ? 0xfff3d6 : 0xffa62b);
@@ -163,8 +235,9 @@ export class Renderer {
     this.cars.delete(id);
   }
 
-  syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null, dt: number): void {
+  syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null, dt: number, vel?: { x: number; y: number; z: number }): void {
     applyInterpolated(this.ballMesh, prev, curr, alpha);
+    this.updateLandingMarker(visible, vel);
     if (offset) this.ballMesh.position.add(offset);
     this.ballMesh.visible = visible;
     this.ballGlow.visible = visible;
@@ -186,26 +259,96 @@ export class Renderer {
       const p = pads[i];
       const v = this.pads[i];
       const active = p.cooldown === 0;
-      const orbs = v.big ? this.bigOrbs : this.smallOrbs;
       const rings = v.big ? this.bigRings : this.smallRings;
-      // Gentle bob so the orbs read as floating pickups; hidden by scaling to nothing.
-      const bob = Math.sin(this.padTime * 2 + v.phase) * (v.big ? 0.12 : 0.05);
-      const y = (v.big ? 1.15 : 0.32) + bob;
-      const sc = active ? 1 : 0;
-      this.padMatrix.makeRotationY(v.big ? this.padTime * 0.8 + v.phase : 0);
-      this.padMatrix.scale(new THREE.Vector3(sc, sc, sc));
-      this.padMatrix.setPosition(v.x, y, v.z);
-      orbs.setMatrixAt(v.index, this.padMatrix);
       rings.setColorAt(v.index, active ? this.padColorOn : this.padColorOff);
-      if (v.halo) {
-        v.halo.visible = active;
-        v.halo.position.y = y;
+      if (v.big) {
+        // Gentle bob so the orb reads as a floating pickup; hidden by scaling to nothing.
+        const bob = Math.sin(this.padTime * 2 + v.phase) * 0.12;
+        const y = 1.15 + bob;
+        const sc = active ? 1 : 0;
+        this.padMatrix.makeRotationY(this.padTime * 0.8 + v.phase);
+        this.padMatrix.scale(new THREE.Vector3(sc, sc, sc));
+        this.padMatrix.setPosition(v.x, y, v.z);
+        this.bigOrbs.setMatrixAt(v.index, this.padMatrix);
+        if (v.halo) {
+          v.halo.visible = active;
+          v.halo.position.y = y;
+        }
+      }
+      // Pickup pop: a quick glow that expands and fades where the pad was taken.
+      if (this.prevPadCooldown.length === pads.length && this.prevPadCooldown[i] === 0 && p.cooldown > 0) {
+        const pop = this.padPops.reduce((a, b) => (a.age > b.age ? a : b));
+        pop.age = 0;
+        pop.sprite.visible = true;
+        pop.sprite.position.set(v.x, v.big ? 1.15 : 0.35, v.z);
+        pop.sprite.scale.setScalar(v.big ? 2.5 : 1.2);
       }
     }
+    if (this.prevPadCooldown.length !== pads.length) this.prevPadCooldown = pads.map((p) => p.cooldown);
+    else for (let i = 0; i < pads.length; i++) this.prevPadCooldown[i] = pads[i].cooldown;
+    for (const pop of this.padPops) {
+      if (!pop.sprite.visible) continue;
+      pop.age += dt;
+      const k = Math.min(1, pop.age / 0.35);
+      pop.sprite.scale.multiplyScalar(1 + dt * 6);
+      (pop.sprite.material as THREE.SpriteMaterial).opacity = 0.9 * (1 - k);
+      if (k >= 1) pop.sprite.visible = false;
+    }
     this.bigOrbs.instanceMatrix.needsUpdate = true;
-    this.smallOrbs.instanceMatrix.needsUpdate = true;
     if (this.bigRings.instanceColor) this.bigRings.instanceColor.needsUpdate = true;
     if (this.smallRings.instanceColor) this.smallRings.instanceColor.needsUpdate = true;
+  }
+
+  /**
+   * Predict where the ball meets the floor by integrating its flight (gravity plus Rapier's
+   * linear damping) and park a ring there. Shown only while the ball is airborne; the ring
+   * grows with the time still to fall, like RL's indicator, and ignores walls.
+   */
+  private updateLandingMarker(visible: boolean, vel?: { x: number; y: number; z: number }): void {
+    const p = this.ballMesh.position;
+    const airborne = visible && vel && (p.y > BALL.restZ + 0.35 || vel.y > 1.5);
+    if (!airborne) {
+      this.landingRing.visible = false;
+      this.landingDisc.visible = false;
+      return;
+    }
+    let x = p.x;
+    let y = p.y;
+    let z = p.z;
+    let vx = vel.x;
+    let vy = vel.y;
+    let vz = vel.z;
+    const h = 1 / 60;
+    const damp = 1 / (1 + h * BALL.drag);
+    let t = 0;
+    let landed = false;
+    for (let i = 0; i < 480; i++) {
+      vy -= GRAVITY * h;
+      vx *= damp;
+      vy *= damp;
+      vz *= damp;
+      x += vx * h;
+      y += vy * h;
+      z += vz * h;
+      t += h;
+      if (y <= BALL.restZ && vy < 0) {
+        landed = true;
+        break;
+      }
+    }
+    if (!landed || Math.abs(x) > ARENA.extentX || Math.abs(z) > ARENA.extentY + ARENA.goalDepth) {
+      this.landingRing.visible = false;
+      this.landingDisc.visible = false;
+      return;
+    }
+    const r = 1 + Math.min(2.2, t * 0.5);
+    this.landingRing.visible = true;
+    this.landingDisc.visible = true;
+    this.landingRing.position.set(x, 0.02, z);
+    this.landingDisc.position.set(x, 0.018, z);
+    this.landingRing.scale.set(r, r, 1);
+    this.landingDisc.scale.set(r, r, 1);
+    (this.landingRing.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.35 * Math.max(0, 1 - t / 2);
   }
 
   /** Goal scored: burst at the ball's last visible position in the team's colour. */
@@ -308,19 +451,19 @@ export class Renderer {
   }
 
   /**
-   * RL-style pickups: big pads float a glowing orb about a metre up, small pads a bright dot,
-   * each on a ring that goes dark while the pad recharges. Four instanced meshes plus six glow
-   * sprites for the big pads: ten draw calls for all 34 pads.
+   * RL-style pickups: big pads float a glowing orb about a metre up on a ring, small pads are a
+   * lit ring on the floor; a ring goes dark while its pad recharges. Three instanced meshes plus
+   * six glow sprites for the big pads: nine draw calls for all 34 pads.
    */
   private buildPads(pads: BoostPad[]): void {
     const bigs = pads.filter((p) => p.big).length;
     const smalls = pads.length - bigs;
     const ringMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85, side: THREE.DoubleSide });
     this.bigOrbs = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.42, 1), new THREE.MeshBasicMaterial({ color: 0xffc24a }), bigs);
-    this.smallOrbs = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe08a }), smalls);
     this.bigRings = new THREE.InstancedMesh(new THREE.RingGeometry(1.35, 1.6, 32), ringMat, bigs);
-    this.smallRings = new THREE.InstancedMesh(new THREE.RingGeometry(0.7, 0.85, 20), ringMat, smalls);
-    for (const m of [this.bigOrbs, this.smallOrbs, this.bigRings, this.smallRings]) {
+    // Small pads are just a lit ring on the floor, as in RL; big pads add the floating orb.
+    this.smallRings = new THREE.InstancedMesh(new THREE.RingGeometry(0.55, 0.9, 20), ringMat, smalls);
+    for (const m of [this.bigOrbs, this.bigRings, this.smallRings]) {
       m.frustumCulled = false;
       this.scene.add(m);
     }
@@ -394,6 +537,7 @@ export class Renderer {
   // ---------------------------------------------------------------------------
 
   private buildCar(team: Team): CarVisual {
+    if (this.assets) return this.buildKitCar(team);
     const group = new THREE.Group();
     const body = new THREE.Group();
     body.position.copy(HITBOX_OFFSET);
@@ -451,7 +595,7 @@ export class Renderer {
       mesh.add(new THREE.Mesh(rimGeo, rim));
       pivot.add(mesh);
       group.add(pivot);
-      wheels.push({ pivot, mesh, radius: d.r, front: d.front });
+      wheels.push({ pivot, mesh, radius: d.r, front: d.front, restY: pivot.position.y });
     }
 
     const flameMaterial = new THREE.MeshBasicMaterial({ color: 0xffa62b });
@@ -460,6 +604,65 @@ export class Renderer {
     flame.position.set(0, -h * 0.1, l / 2 + 0.45);
     flame.visible = false;
     body.add(flame);
+
+    const trail = new Ribbon(10, 0.13, team === 'blue' ? 0x4f8cff : 0xff9030, 0.11, 0.55);
+    const shadow = new BlobShadow(0.95, 6);
+    this.scene.add(group, trail.mesh, shadow.mesh);
+    return { group, team, wheels, flame, flameMaterial, nameplate: null, name: '', trail, shadow };
+  }
+
+  /** Kenney kit body fitted to the Octane hitbox, kit wheels at RL's hardpoints and radii. */
+  private buildKitCar(team: Team): CarVisual {
+    const a = this.assets!;
+    const group = new THREE.Group();
+    const body = a.body.clone() as THREE.Mesh;
+    body.material = a.bodyMaterial[team];
+    // Kit cars face +Z; ours face -Z. Fit the body's box to the hitbox (a touch taller so the
+    // roofline is not squashed), centred on the hitbox centre.
+    body.rotation.set(0, Math.PI, 0);
+    body.position.set(0, 0, 0);
+    body.scale.set(1, 1, 1);
+    body.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(body);
+    const size = box.getSize(new THREE.Vector3());
+    const sx = (HITBOX_HALF.x * 2) / size.x;
+    const sy = (HITBOX_HALF.y * 2 * 1.18) / size.y;
+    const sz = (HITBOX_HALF.z * 2) / size.z;
+    body.scale.set(sx, sy, sz);
+    body.updateMatrixWorld(true);
+    const box2 = new THREE.Box3().setFromObject(body);
+    const centre = box2.getCenter(new THREE.Vector3());
+    body.position.set(HITBOX_OFFSET.x - centre.x, HITBOX_OFFSET.y - centre.y + HITBOX_HALF.y * 0.09, HITBOX_OFFSET.z - centre.z);
+    group.add(body);
+
+    const wheelDefs = [
+      { x: OCT.frontWheelOffset.y, z: -OCT.frontWheelOffset.x, r: OCT.frontWheelRadius, front: true },
+      { x: -OCT.frontWheelOffset.y, z: -OCT.frontWheelOffset.x, r: OCT.frontWheelRadius, front: true },
+      { x: OCT.rearWheelOffset.y, z: -OCT.rearWheelOffset.x, r: OCT.rearWheelRadius, front: false },
+      { x: -OCT.rearWheelOffset.y, z: -OCT.rearWheelOffset.x, r: OCT.rearWheelRadius, front: false },
+    ];
+    const wheels: CarVisual['wheels'] = [];
+    for (const d of wheelDefs) {
+      const pivot = new THREE.Group();
+      const restY = d.r - OCT.restZ;
+      pivot.position.set(d.x + Math.sign(d.x) * 0.03, restY, d.z);
+      const holder = new THREE.Group(); // rolls about X; the kit wheel's hub faces +X, so mirror the right side
+      const mesh = a.wheel.clone();
+      const k = d.r / a.wheelRadius;
+      mesh.scale.setScalar(k);
+      mesh.rotation.y = d.x < 0 ? Math.PI : 0;
+      holder.add(mesh);
+      pivot.add(holder);
+      group.add(pivot);
+      wheels.push({ pivot, mesh: holder, radius: d.r, front: d.front, restY });
+    }
+
+    const flameMaterial = new THREE.MeshBasicMaterial({ color: 0xffa62b });
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.9, 8), flameMaterial);
+    flame.rotation.x = Math.PI / 2;
+    flame.position.set(0, HITBOX_OFFSET.y - HITBOX_HALF.y * 0.2, HITBOX_OFFSET.z + HITBOX_HALF.z + 0.45);
+    flame.visible = false;
+    group.add(flame);
 
     const trail = new Ribbon(10, 0.13, team === 'blue' ? 0x4f8cff : 0xff9030, 0.11, 0.55);
     const shadow = new BlobShadow(0.95, 6);
@@ -486,6 +689,88 @@ function applyInterpolated(obj: THREE.Object3D, a: BodyState, b: BodyState, alph
 /** Front-wheel steer angle at full lock for a given forward speed (RL's steer curve). */
 function steerAngleFor(forwardSpeed: number): number {
   return curve(CAR.steerAngleFromSpeedCurve, Math.abs(forwardSpeed) / UU);
+}
+
+/** The palette colour most of a mesh's vertices point at (the paint colour of a Kenney kit body). */
+function dominantTexel(geometry: THREE.BufferGeometry, map: THREE.Texture | null): [number, number, number] | null {
+  const uv = geometry.attributes.uv as THREE.BufferAttribute | undefined;
+  const img = map?.image as (HTMLImageElement | ImageBitmap | HTMLCanvasElement) | undefined;
+  if (!uv || !img || !img.width) return null;
+  const cv = document.createElement('canvas');
+  cv.width = img.width;
+  cv.height = img.height;
+  const ctx = cv.getContext('2d')!;
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
+  const counts = new Map<number, number>();
+  for (let i = 0; i < uv.count; i++) {
+    const u = uv.getX(i) - Math.floor(uv.getX(i));
+    let v = uv.getY(i) - Math.floor(uv.getY(i));
+    if (map!.flipY) v = 1 - v;
+    const px = Math.min(cv.width - 1, Math.floor(u * cv.width));
+    const py = Math.min(cv.height - 1, Math.floor(v * cv.height));
+    const o = (py * cv.width + px) * 4;
+    // Only saturated, reasonably bright texels count: the paint, not tyres, glass or trim.
+    const r = data[o];
+    const g = data[o + 1];
+    const b = data[o + 2];
+    const mx = Math.max(r, g, b);
+    const mn = Math.min(r, g, b);
+    if (mx < 60 || (mx - mn) / Math.max(1, mx) < 0.35) continue;
+    const key = (r << 16) | (g << 8) | b;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let best = -1;
+  let bestN = 0;
+  for (const [k, n] of counts) if (n > bestN) [best, bestN] = [k, n];
+  return best < 0 ? null : [(best >> 16) & 255, (best >> 8) & 255, best & 255];
+}
+
+/**
+ * Copy a palette texture with every texel of the paint's hue (all its light and dark shades)
+ * repainted to the team colour, keeping each shade's relative lightness and the GLTF texture
+ * settings. Greys and other hues (glass, lights, tyres) are left alone.
+ */
+function recolourPalette(map: THREE.Texture, from: [number, number, number], toHex: number): THREE.Texture {
+  const img = map.image as HTMLImageElement | ImageBitmap | HTMLCanvasElement;
+  const cv = document.createElement('canvas');
+  cv.width = img.width;
+  cv.height = img.height;
+  const ctx = cv.getContext('2d')!;
+  ctx.drawImage(img, 0, 0);
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  const d = id.data;
+  const src = new THREE.Color(from[0] / 255, from[1] / 255, from[2] / 255);
+  const srcHsl = { h: 0, s: 0, l: 0 };
+  src.getHSL(srcHsl);
+  const team = new THREE.Color(toHex).convertLinearToSRGB();
+  const teamHsl = { h: 0, s: 0, l: 0 };
+  team.getHSL(teamHsl);
+  const px = new THREE.Color();
+  const hsl = { h: 0, s: 0, l: 0 };
+  for (let i = 0; i < d.length; i += 4) {
+    px.setRGB(d[i] / 255, d[i + 1] / 255, d[i + 2] / 255);
+    px.getHSL(hsl);
+    let dh = Math.abs(hsl.h - srcHsl.h);
+    if (dh > 0.5) dh = 1 - dh;
+    if (hsl.s < 0.2 || dh > 0.07) continue; // not a shade of the paint
+    const l = Math.min(0.92, Math.max(0.05, teamHsl.l * (hsl.l / Math.max(0.05, srcHsl.l))));
+    px.setHSL(teamHsl.h, teamHsl.s, l);
+    d[i] = Math.round(px.r * 255);
+    d[i + 1] = Math.round(px.g * 255);
+    d[i + 2] = Math.round(px.b * 255);
+  }
+  ctx.putImageData(id, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.flipY = map.flipY;
+  tex.colorSpace = map.colorSpace;
+  tex.wrapS = map.wrapS;
+  tex.wrapT = map.wrapT;
+  tex.magFilter = map.magFilter;
+  tex.minFilter = map.minFilter;
+  tex.generateMipmaps = map.generateMipmaps;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 /** Name floating above another player's car. Canvas text on a sprite, built once per name. */

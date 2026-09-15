@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   const probe = await Game.create(FREE_PLAY_CONFIG); // also initialises the physics engine
   const renderer = new Renderer(app, arenaGeometry, probe.pads);
   probe.destroy();
+  void renderer.loadAssets();
   const followCam = new FollowCamera(settings);
   const input = new InputManager(settings);
   const menu = new Menu(document.body, input, settings);
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
   dbg.__menu = menu;
   dbg.__renderer = renderer;
   dbg.__camera = followCam;
+  dbg.__sound = sound;
   Object.defineProperty(dbg, '__session', { get: () => session, configurable: true });
   Object.defineProperty(dbg, '__game', { get: () => session?.game ?? null, configurable: true });
 
@@ -340,7 +342,7 @@ async function main(): Promise<void> {
     // --- Render ----------------------------------------------------------------------
     const carStates = s.carRenderStates();
     renderer.syncCars(carStates, s.localId, frameDt);
-    renderer.syncBall(game.prev.ball, game.curr.ball, s.alpha, game.ballVisible, s.ballOffset(), frameDt);
+    renderer.syncBall(game.prev.ball, game.curr.ball, s.alpha, game.ballVisible, s.ballOffset(), frameDt, game.ball.linvel());
     renderer.syncPads(game.pads, frameDt);
     const carObj = renderer.carObject(s.localId);
     if (carObj) {
@@ -399,7 +401,15 @@ async function main(): Promise<void> {
       goal: scoreTotal > prevScoreTotal,
       wallHitSpeedUU: wallHit,
       countdown: countdownSound,
+      ballDistance: renderer.camera.position.distanceTo(renderer.ballMesh.position),
     });
+    // Controller rumble on the same edges.
+    if (landedSpeedUU > 0) input.rumble(Math.min(1, landedSpeedUU / 1200), 0.2, 90);
+    if (game.ballHitRelSpeed > 0 && game.lastTouch === s.localId) input.rumble(Math.min(1, game.ballHitRelSpeed / UU / 2500), 0.4, 120);
+    if (wallHit > 300) input.rumble(Math.min(1, wallHit / 2300), 0.3, 100);
+    if (dodged) input.rumble(0.2, 0.5, 70);
+    if (localCar.boosting && Math.floor(now / 90) !== Math.floor((now - frameDt * 1000) / 90)) input.rumble(0, 0.12, 100);
+    if (scoreTotal > prevScoreTotal) input.rumble(0.9, 0.9, 450);
     countdownSound = 0;
     prevJumping = localCar.isJumping;
     prevGrounded = grounded;

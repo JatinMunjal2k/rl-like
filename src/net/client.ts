@@ -569,6 +569,7 @@ export class ClientSession implements Session {
         supersonic: b.supersonic,
         offsetPos: null,
         offsetQuat: null,
+        wheelY: null,
       });
       // Drop samples well behind the playback point.
       while (s.length > 2 && s[1].tick < T - 10) s.shift();

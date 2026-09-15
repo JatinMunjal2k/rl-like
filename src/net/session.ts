@@ -27,6 +27,8 @@ export interface CarRenderState {
   /** Visual-only correction that decays after a misprediction (client's own car). */
   offsetPos: Vector3 | null;
   offsetQuat: Quaternion | null;
+  /** Local y of each wheel centre (FL, FR, RL, RR) for suspension animation; null = rest pose. */
+  wheelY: number[] | null;
 }
 
 export interface LobbyState {
@@ -90,6 +92,7 @@ export function liveCarState(game: Game, id: number, alpha: number, name: string
     supersonic: car.supersonic,
     offsetPos: null,
     offsetQuat: null,
+    wheelY: car.wheelCenterY([0, 0, 0, 0]),
   };
 }
 

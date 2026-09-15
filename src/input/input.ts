@@ -181,6 +181,18 @@ export class InputManager {
     return this.capture !== null;
   }
 
+  /** Controller vibration (dual-rumble), if the connected pad supports it. Intensities 0..1, duration ms. */
+  rumble(strong: number, weak: number, ms: number): void {
+    const gp = this.currentGamepad();
+    const act = (gp as (Gamepad & { vibrationActuator?: { playEffect?: (type: string, params: object) => Promise<unknown> } }) | null)?.vibrationActuator;
+    if (!act?.playEffect) return;
+    try {
+      void act.playEffect('dual-rumble', { startDelay: 0, duration: ms, strongMagnitude: Math.min(1, strong), weakMagnitude: Math.min(1, weak) }).catch(() => {});
+    } catch {
+      /* unsupported */
+    }
+  }
+
   /** Ignore the jump button until it is released, so the press that closed the menu does not jump. */
   blockJumpUntilRelease(): void {
     this.blockJump = true;

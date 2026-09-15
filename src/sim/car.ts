@@ -223,6 +223,21 @@ export class Car {
     );
   }
 
+  /**
+   * Visual suspension: local y of each wheel centre (order FL, FR, RL, RR) from the last ray
+   * probe: the hardpoint minus the trace length plus the wheel radius, clamped to the travel.
+   */
+  wheelCenterY(out: number[]): number[] {
+    for (let i = 0; i < WHEELS.length; i++) {
+      const def = WHEELS[i];
+      const w = this.wheels[i];
+      const trace = w.contact ? w.traceLen : def.restDist + CAR.maxSuspensionTravel;
+      const clamped = Math.max(def.restDist - CAR.maxSuspensionTravel, Math.min(def.restDist + CAR.maxSuspensionTravel, trace));
+      out[i] = def.hardpoint.y - clamped + def.radius;
+    }
+    return out;
+  }
+
   /** True once the double jump has been used this flight (sound edge). */
   get doubleJumped(): boolean {
     return this.hasDoubleJumped;

@@ -33,7 +33,7 @@ const INERTIA_LOCAL = new Vector3(
 );
 
 interface WheelDef {
-  /** Hardpoint relative to the hitbox centre (RL x forward -> our -z; RL y -> our x). */
+  /** Hardpoint relative to the body origin (RL x forward -> our -z; RL y -> our x; RL z -> our y). */
   hardpoint: Vector3;
   restDist: number;
   radius: number;
@@ -49,7 +49,6 @@ const WHEELS: WheelDef[] = [
 ].map(({ side, front }) => {
   const off = front ? OCTANE.frontWheelOffset : OCTANE.rearWheelOffset;
   return {
-    // Relative to the body origin (RL car origin): RL x forward -> -z, RL y -> x, RL z -> y.
     hardpoint: new Vector3(side * off.y, off.z, -off.x),
     restDist: front ? OCTANE.frontSuspensionRest : OCTANE.rearSuspensionRest,
     radius: front ? OCTANE.frontWheelRadius : OCTANE.rearWheelRadius,
@@ -96,7 +95,8 @@ export interface CarOptions {
 /**
  * Octane on a Rapier dynamic body, driven the way RocketSim drives Bullet: four wheel rays
  * with spring/damper suspension and slip-curve friction applied as impulses, a sticky force,
- * and RL's jump / flip / air-control rules applied to the velocities. See rl.ts for sources.
+ * and RL's jump / flip / air-control rules applied to the velocities. Method order and names
+ * follow RocketSim's Car::_PreTickUpdate. See rl.ts for sources.
  */
 export class Car {
   readonly body: RAPIER.RigidBody;
@@ -114,7 +114,7 @@ export class Car {
   isFlipping = false;
   isAutoflipping = false;
   handbrakeVal = 0;
-  /** Player setting: stick magnitude needed for a dodge instead of a double jump (RL default 0.5). */
+  /** Player setting: |yaw| + |pitch| + |roll| needed for a dodge instead of a double jump (RL default 0.5). */
   dodgeDeadzone = 0.5;
   infiniteBoost: boolean;
   /** Per-tick diagnostics (vertical components of impulses applied this tick, in m/s of chassis velocity). */
@@ -183,6 +183,7 @@ export class Car {
     this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.preStepAngVel.set(0, 0, 0);
     this.boost = CAR.boostSpawnAmount;
     this.boosting = false;
     this.supersonic = false;
@@ -197,6 +198,8 @@ export class Car {
     this.hasDoubleJumped = false;
     this.hasFlipped = false;
     this.flipTime = 0;
+    this.flipDirForward = 0;
+    this.flipDirSide = 0;
     this.autoflipTimer = 0;
     this.boostingTime = 0;
     this.supersonicTime = 0;
@@ -232,41 +235,28 @@ export class Car {
       this.applySticky(realThrottle, dt);
     }
 
-    // --- State machine ------------------------------------------------------------
-    if (this.grounded) {
-      this.hasDoubleJumped = false;
-      this.hasFlipped = false;
-      this.isFlipping = false;
-      this.isAutoflipping = false;
-      this.autoflipTimer = 0;
-      this.flipTime = 0;
-      this.airTimeSinceJump = 0;
-      if (!this.isJumping && this.jumpTime >= CAR.jumpMinTime + CAR.jumpResetTimePad) this.hasJumped = false;
-      if (!this.isJumping && !this.hasJumped) this.jumpTime = 0;
+    // --- Air torque (Car::_UpdateAirTorque): flip torque with < 3 wheels, air control with 0 --
+    if (this.numWheelsInContact < CAR.wheelsForGround) {
+      this.updateAirTorque(input, dt, this.numWheelsInContact === 0);
     } else {
-      // A car that fell off a surface without jumping keeps airTimeSinceJump at 0 and can flip any time.
-      if (this.hasJumped && !this.isJumping) this.airTimeSinceJump += dt;
-      else this.airTimeSinceJump = 0;
-
-      const allowAirControl = this.updateFlip(input, dt);
-      this.updateAutoflip(input, dt, jumpPressed);
-      if (allowAirControl && !this.isAutoflipping) this.controlInAir(input, dt);
-      vel.addScaledVector(forward, CAR.airThrottleAccel * input.throttle * dt);
+      this.isFlipping = false;
     }
 
-    const partialContact = this.numWheelsInContact > 0 && this.numWheelsInContact < 4;
-    if (!this.grounded && !this.isAutoflipping && (partialContact || this.worldContact)) this.autoroll(input, dt);
-
     this.updateJump(input, dt, jumpPressed);
-    this.updateBoost(input, dt, willBoost);
+    this.updateAutoflip(dt, jumpPressed);
+    this.updateDoubleJumpOrFlip(input, dt, jumpPressed);
 
-    // Hard caps, applied every tick like RocketSim's _FinishPhysicsTick.
-    const speed = vel.length();
-    if (speed > CAR.maxSpeed) vel.multiplyScalar(CAR.maxSpeed / speed);
-    const angSpeed = angVel.length();
-    if (angSpeed > CAR.maxAngularSpeed) angVel.multiplyScalar(CAR.maxAngularSpeed / angSpeed);
-    this.updateSupersonic(speed, dt);
+    const partialContact = this.numWheelsInContact > 0 && this.numWheelsInContact < 4;
+    if (Math.abs(input.throttle) >= CAR.throttleDeadzone && !this.isAutoflipping && (partialContact || this.worldContact)) {
+      this.autoroll(dt);
+    }
 
+    this.updateBoost(dt, willBoost);
+    this.updateSupersonic(vel.length(), dt);
+
+    // No caps here: RocketSim clamps in _FinishPhysicsTick AFTER the step, so the rotation of
+    // this step integrates with up to one tick of torque above the cap. That extra ~2 rad/s during
+    // the 0.65 s flip is what makes RL flips come round a full turn. See postStep().
     this.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
     this.body.setAngvel({ x: angVel.x, y: angVel.y, z: angVel.z }, true);
     this.preStepAngVel.copy(angVel);
@@ -274,10 +264,11 @@ export class Car {
   }
 
   /**
-   * Call right after the physics step. Rapier integrates gyroscopic precession for the box
-   * inertia, so a flip about a non-principal axis (any diagonal flip) tumbles and drifts the
-   * heading. Bullet, and therefore Rocket League, does not: torque-free angular velocity stays
-   * constant in world space. If nothing touched the car during the step, restore it.
+   * Call right after the physics step (Car::_FinishPhysicsTick).
+   *  - Rapier integrates gyroscopic precession for the box inertia, so a flip about a
+   *    non-principal axis tumbles. Bullet with RocketSim's flags does not: if nothing touched the
+   *    car during the step, restore the pre-step angular velocity.
+   *  - Then clamp speed and angular speed to RL's caps.
    */
   postStep(): void {
     let touched = false;
@@ -293,6 +284,19 @@ export class Car {
       });
     });
     if (!touched) this.body.setAngvel({ x: this.preStepAngVel.x, y: this.preStepAngVel.y, z: this.preStepAngVel.z }, true);
+
+    const lv = this.body.linvel();
+    const speed = Math.hypot(lv.x, lv.y, lv.z);
+    if (speed > CAR.maxSpeed) {
+      const k = CAR.maxSpeed / speed;
+      this.body.setLinvel({ x: lv.x * k, y: lv.y * k, z: lv.z * k }, true);
+    }
+    const av = this.body.angvel();
+    const angSpeed = Math.hypot(av.x, av.y, av.z);
+    if (angSpeed > CAR.maxAngularSpeed) {
+      const k = CAR.maxAngularSpeed / angSpeed;
+      this.body.setAngvel({ x: av.x * k, y: av.y * k, z: av.z * k }, true);
+    }
   }
 
   private readState(): void {
@@ -368,9 +372,11 @@ export class Car {
   /**
    * Bullet raycast-vehicle suspension, replicated in BT units so RocketSim's constants apply
    * verbatim: force = ((rest - length) * k / (n·up) - c * relVel) * forceScale, never negative,
-   * applied as an impulse along the contact normal at the contact point.
+   * plus RocketSim's "extra pushback" rigid contact once a wheel compresses past 2.5 uu.
+   * Applied as an impulse along the contact normal at the contact point.
    */
   private applySuspension(dt: number): void {
+    qInv.copy(q).invert();
     for (let i = 0; i < WHEELS.length; i++) {
       const w = this.wheels[i];
       if (!w.contact) continue;
@@ -383,9 +389,9 @@ export class Car {
       const denom = w.normal.dot(up);
       let relVel = 0;
       let invDot = 10;
+      rA.subVectors(w.point, pos);
+      vc.copy(angVel).cross(rA).add(vel);
       if (denom > 0.1) {
-        rA.subVectors(w.point, pos);
-        vc.copy(angVel).cross(rA).add(vel);
         relVel = w.normal.dot(vc) / denom;
         invDot = 1 / denom;
       }
@@ -396,21 +402,17 @@ export class Car {
       let forceBt = (compressionBt * CAR.suspensionStiffness * invDot - damping * relVelBt) * def.forceScale;
       if (forceBt < 0) forceBt = 0;
 
-      // [RS] "Extra pushback": once a wheel ray is shorter than rest - 2.5 uu the wheel acts as a
-      // rigid contact (Bullet resolveSingleCollision, restitution 0, erp 0.2), split over the
-      // four wheels. This is what stops a hard landing from sinking the hitbox into the floor.
+      // Extra pushback: Bullet resolveSingleCollision (restitution 0, erp 0.2) split over the wheels.
       let extraPushback = 0;
       const pushbackThresh = def.restDist - CAR.suspensionSubtraction;
       if (w.traceLen < pushbackThresh) {
-        rA.subVectors(w.point, pos);
-        vc.copy(angVel).cross(rA).add(vel);
         const approach = w.normal.dot(vc); // negative when moving into the surface
         const positionalError = (CAR.contactErp * (pushbackThresh - w.traceLen)) / dt;
         const velocityError = -approach;
-        tmp.copy(rA).cross(w.normal).applyQuaternion(qInv.copy(q).invert());
-        const denom =
+        tmp.copy(rA).cross(w.normal).applyQuaternion(qInv);
+        const denomJ =
           1 / CAR.mass + (tmp.x * tmp.x) / INERTIA_LOCAL.x + (tmp.y * tmp.y) / INERTIA_LOCAL.y + (tmp.z * tmp.z) / INERTIA_LOCAL.z;
-        extraPushback = Math.max(0, (positionalError + velocityError) / denom) / WHEELS.length;
+        extraPushback = Math.max(0, (positionalError + velocityError) / denomJ) / WHEELS.length;
       }
       if (forceBt === 0 && extraPushback === 0) continue;
 
@@ -502,8 +504,8 @@ export class Car {
 
       // Side impulse: Bullet resolveSingleBilateral against a static ground, in BT units.
       // jacDiagAB = 1/m + (r×a)·I⁻¹(r×a), with r and I in BT.
-      tmp.copy(rA).multiplyScalar(M_TO_BT).cross(axle); // r×a (BT)
-      tmp3.copy(tmp).applyQuaternion(qInv); // to local frame
+      tmp.copy(rA).multiplyScalar(M_TO_BT).cross(axle);
+      tmp3.copy(tmp).applyQuaternion(qInv);
       const inertiaTerm =
         (tmp3.x * tmp3.x) / (INERTIA_LOCAL.x * M_TO_BT * M_TO_BT) +
         (tmp3.y * tmp3.y) / (INERTIA_LOCAL.y * M_TO_BT * M_TO_BT) +
@@ -552,88 +554,166 @@ export class Car {
   }
 
   // ---------------------------------------------------------------------------
-  // Air control
+  // Air torque: flips, flip cancel, air control
   // ---------------------------------------------------------------------------
 
-  private controlInAir(input: CarInput, dt: number): void {
+  /**
+   * Car::_UpdateAirTorque. Flip torque while flipping (pitch input with the flip's sign scales it
+   * down: flip cancel). Air control otherwise, and during a cancel or stall, but only with no
+   * wheel touching; pitch input is locked during the flip and for 0.3 s after. Roll damping is
+   * always full; pitch/yaw damping scale with (1 - |input|). Torques are angular accelerations.
+   * Local axes: x = pitch (+ nose up), y = yaw (+ left), z = roll (+ roll left).
+   */
+  private updateAirTorque(input: CarInput, dt: number, updateAirControl: boolean): void {
     qInv.copy(q).invert();
     localAng.copy(angVel).applyQuaternion(qInv);
 
-    // Local axes: x = pitch (+ nose up), y = yaw (+ left), z = roll (+ roll left).
-    // Pitch is locked in the coast phase after a flip; during the flip itself pitch is what cancels it.
-    const pitchLocked = this.hasFlipped && !this.isFlipping && this.flipTime < CAR.flipTorqueTime + CAR.flipPitchLockExtraTime;
-    const pitchIn = pitchLocked ? 0 : input.pitch;
-    const yawIn = -input.yaw;
-    const rollIn = -input.roll;
+    let doAirControl = false;
+    if (this.isFlipping) this.isFlipping = this.hasFlipped && this.flipTime < CAR.flipTorqueTime;
 
-    const s = CAR.torqueScale;
-    localAng.x += CAR.airControlTorque.pitch * s * pitchIn * dt;
-    localAng.y += CAR.airControlTorque.yaw * s * yawIn * dt;
-    localAng.z += CAR.airControlTorque.roll * s * rollIn * dt;
+    if (this.isFlipping) {
+      if (this.flipDirForward !== 0 || this.flipDirSide !== 0) {
+        let pitchScale = 1;
+        if (this.flipDirForward !== 0 && input.pitch !== 0 && Math.sign(this.flipDirForward) === Math.sign(input.pitch)) {
+          pitchScale = 1 - Math.min(Math.abs(input.pitch), 1);
+          doAirControl = true;
+        }
+        // Forward flip = nose down = negative pitch; side flip right = roll right = negative local z.
+        localAng.x -= this.flipDirForward * pitchScale * CAR.flipTorqueY * dt;
+        localAng.z -= this.flipDirSide * CAR.flipTorqueX * dt;
+      } else {
+        doAirControl = true; // stall: a flip with no direction
+      }
+    } else {
+      doAirControl = true;
+    }
 
-    localAng.x -= localAng.x * CAR.airControlDamping.pitch * s * (1 - Math.abs(pitchIn)) * dt;
-    localAng.y -= localAng.y * CAR.airControlDamping.yaw * s * (1 - Math.abs(yawIn)) * dt;
-    localAng.z -= localAng.z * CAR.airControlDamping.roll * s * (1 - Math.abs(rollIn)) * dt;
+    doAirControl = doAirControl && !this.isAutoflipping && updateAirControl;
+    if (doAirControl) {
+      let pitchTorqueScale = 1;
+      if (this.isFlipping) pitchTorqueScale = 0;
+      else if (this.hasFlipped && this.flipTime < CAR.flipTorqueTime + CAR.flipPitchLockExtraTime) pitchTorqueScale = 0;
+
+      const s = CAR.torqueScale;
+      const pitchIn = input.pitch * pitchTorqueScale;
+      const yawIn = -input.yaw;
+      const rollIn = -input.roll;
+      // Damping from the pre-torque angular velocity, as one combined torque in RocketSim.
+      const dampX = localAng.x * CAR.airControlDamping.pitch * (1 - Math.abs(pitchIn));
+      const dampY = localAng.y * CAR.airControlDamping.yaw * (1 - Math.abs(yawIn));
+      const dampZ = localAng.z * CAR.airControlDamping.roll;
+      localAng.x += (CAR.airControlTorque.pitch * pitchIn - dampX) * s * dt;
+      localAng.y += (CAR.airControlTorque.yaw * yawIn - dampY) * s * dt;
+      localAng.z += (CAR.airControlTorque.roll * rollIn - dampZ) * s * dt;
+    }
 
     angVel.copy(localAng).applyQuaternion(q);
+
+    // Air throttle is tiny but real.
+    vel.addScaledVector(forward, CAR.airThrottleAccel * input.throttle * dt);
   }
 
   // ---------------------------------------------------------------------------
-  // Jumping, double jump, dodge, flip cancel
+  // Jumping, double jump, dodge
   // ---------------------------------------------------------------------------
 
+  /** Car::_UpdateJump. */
   private updateJump(input: CarInput, dt: number, jumpPressed: boolean): void {
-    if (this.isJumping) {
-      this.jumpTime += dt;
-      const keepGoing = this.jumpTime < CAR.jumpMinTime || (input.jump && this.jumpTime < CAR.jumpMaxTime);
-      if (keepGoing) {
-        const scale = this.jumpTime < CAR.jumpMinTime ? CAR.jumpPreMinAccelScale : 1;
-        vel.addScaledVector(up, CAR.jumpAccel * scale * dt);
+    if (this.grounded && !this.isJumping) {
+      if (this.hasJumped && this.jumpTime < CAR.jumpMinTime + CAR.jumpResetTimePad) {
+        // Still leaving the ground after a minimum-time jump; keep the jump state.
       } else {
-        this.isJumping = false;
-        this.airTimeSinceJump = 0;
+        this.hasJumped = false;
+        this.jumpTime = 0;
       }
-      return;
     }
 
-    if (jumpPressed && this.grounded) {
-      vel.addScaledVector(up, CAR.jumpImmediateForce);
+    if (this.isJumping) {
+      this.isJumping = this.jumpTime < CAR.jumpMinTime || (input.jump && this.jumpTime < CAR.jumpMaxTime);
+    } else if (this.grounded && jumpPressed) {
       this.isJumping = true;
       this.jumpTime = 0;
+      vel.addScaledVector(up, CAR.jumpImmediateForce);
+    }
+
+    if (this.isJumping) {
       this.hasJumped = true;
-      return;
+      const scale = this.jumpTime < CAR.jumpMinTime ? CAR.jumpPreMinAccelScale : 1;
+      vel.addScaledVector(up, CAR.jumpAccel * scale * dt);
     }
 
-    const canSecond =
-      jumpPressed &&
-      !this.grounded &&
-      !this.hasDoubleJumped &&
-      !this.hasFlipped &&
-      !this.isAutoflipping &&
-      this.airTimeSinceJump < CAR.doubleJumpMaxDelay;
-    if (!canSecond) return;
+    if (this.isJumping || this.hasJumped) this.jumpTime += dt;
+  }
 
-    // RL builds the dodge direction from (-pitch, yaw + roll). The player's dodge deadzone
-    // setting decides dodge vs double jump; RocketSim then zeroes tiny components.
-    let df = -input.pitch;
-    let ds = input.yaw + input.roll;
-    const stickMag = Math.hypot(df, ds);
-    if (Math.abs(df) < CAR.flipDodgeDeadzone) df = 0;
-    if (Math.abs(ds) < CAR.flipDodgeDeadzone) ds = 0;
-    const mag = Math.hypot(df, ds);
+  /** Car::_UpdateDoubleJumpOrFlip. */
+  private updateDoubleJumpOrFlip(input: CarInput, dt: number, jumpPressed: boolean): void {
+    if (this.grounded) {
+      this.hasDoubleJumped = false;
+      this.hasFlipped = false;
+      this.airTimeSinceJump = 0;
+      this.flipTime = 0;
+    } else {
+      // A car that fell off a surface without jumping keeps airTimeSinceJump at 0 and can flip any time.
+      if (this.hasJumped && !this.isJumping) this.airTimeSinceJump += dt;
+      else this.airTimeSinceJump = 0;
 
-    if (mag === 0 || stickMag < this.dodgeDeadzone) {
-      vel.addScaledVector(up, CAR.doubleJumpImpulse);
-      this.hasDoubleJumped = true;
-      return;
+      if (jumpPressed && this.airTimeSinceJump < CAR.doubleJumpMaxDelay) {
+        const inputMagnitude = Math.abs(input.yaw) + Math.abs(input.pitch) + Math.abs(input.roll);
+        const isFlipInput = inputMagnitude >= this.dodgeDeadzone;
+        let canUse = !this.hasDoubleJumped && !this.hasFlipped;
+        if (this.isAutoflipping) canUse = false;
+
+        if (canUse) {
+          if (isFlipInput) {
+            this.flipTime = 0;
+            this.hasFlipped = true;
+            this.isFlipping = true;
+
+            // Dodge direction from (-pitch, yaw + roll). The torque uses the normalised direction;
+            // the impulse zeroes components under 0.1 first.
+            let df = -input.pitch;
+            let ds = input.yaw + input.roll;
+            if (Math.abs(ds) < CAR.flipDodgeDeadzone && Math.abs(df) < CAR.flipDodgeDeadzone) {
+              df = 0;
+              ds = 0;
+            } else {
+              const m = Math.hypot(df, ds);
+              df /= m;
+              ds /= m;
+            }
+            this.flipDirForward = df;
+            this.flipDirSide = ds;
+
+            if (Math.abs(df) < CAR.flipDodgeDeadzone) df = 0;
+            if (Math.abs(ds) < CAR.flipDodgeDeadzone) ds = 0;
+            if (df !== 0 || ds !== 0) this.applyDodgeImpulse(df, ds);
+          } else {
+            vel.addScaledVector(up, CAR.doubleJumpImpulse);
+            this.hasDoubleJumped = true;
+          }
+        }
+      }
     }
 
-    df /= mag;
-    ds /= mag;
+    if (this.isFlipping) {
+      this.flipTime += dt;
+      if (this.flipTime <= CAR.flipTorqueTime) {
+        // Vertical velocity damping during the dodge: the "float".
+        if (this.flipTime >= CAR.flipZDampStart && (vel.y < 0 || this.flipTime < CAR.flipZDampEnd)) {
+          vel.y *= Math.pow(1 - CAR.flipZDamp120, dt * 120);
+        }
+      }
+    } else if (this.hasFlipped) {
+      // Keeps counting after the flip for the pitch lock window.
+      this.flipTime += dt;
+    }
+  }
+
+  private applyDodgeImpulse(df: number, ds: number): void {
     const forwardSpeed = vel.dot(forward);
     const speedRatio = Math.abs(forwardSpeed) / CAR.maxSpeed;
     const backwards =
-      Math.abs(forwardSpeed) < CAR.flipBackwardSpeedThreshold ? df < 0 : df !== 0 && Math.sign(df) !== Math.sign(forwardSpeed);
+      Math.abs(forwardSpeed) < CAR.flipBackwardSpeedThreshold ? df < 0 : df >= 0 !== forwardSpeed >= 0;
 
     let vx = df * CAR.flipInitialVelScale;
     let vy = ds * CAR.flipInitialVelScale;
@@ -645,77 +725,42 @@ export class Car {
     // [RS] The impulse uses the HORIZONTAL projections of forward and right (forwardDir2D), so a
     // pitched car does not dodge into the ground or the sky.
     const fwd2D = tmp.set(forward.x, 0, forward.z);
-    if (fwd2D.lengthSq() < 1e-6) fwd2D.set(right.z, 0, -right.x); // nose vertical: derive from right
+    if (fwd2D.lengthSq() < 1e-6) fwd2D.set(right.z, 0, -right.x);
     fwd2D.normalize();
     const right2D = tmp2.set(-fwd2D.z, 0, fwd2D.x); // fwd2D × up
     vel.addScaledVector(fwd2D, vx).addScaledVector(right2D, vy);
-
-    this.hasFlipped = true;
-    this.isFlipping = true;
-    this.flipTime = 0;
-    this.flipDirForward = df;
-    this.flipDirSide = ds;
-  }
-
-  /** Advances the flip. Returns whether normal air control is allowed this tick. */
-  private updateFlip(input: CarInput, dt: number): boolean {
-    if (!this.hasFlipped) return true;
-    this.flipTime += dt;
-    this.isFlipping = this.flipTime < CAR.flipTorqueTime;
-
-    let allowAirControl = !this.isFlipping;
-    if (this.isFlipping) {
-      // Flip cancel: pitching the same way as the flip's pitch torque scales it down.
-      let pitchScale = 1;
-      if (this.flipDirForward !== 0 && input.pitch !== 0 && Math.sign(this.flipDirForward) === Math.sign(input.pitch)) {
-        pitchScale = 1 - Math.min(Math.abs(input.pitch), 1);
-        allowAirControl = true;
-      }
-      qInv.copy(q).invert();
-      localAng.copy(angVel).applyQuaternion(qInv);
-      // Forward flip = nose down = negative pitch; side flip right = roll right = negative local z.
-      localAng.x -= this.flipDirForward * pitchScale * CAR.flipTorqueY * dt;
-      localAng.z -= this.flipDirSide * CAR.flipTorqueX * dt;
-      angVel.copy(localAng).applyQuaternion(q);
-
-      // Vertical velocity damping during the dodge window.
-      if (this.flipTime >= CAR.flipZDampStart && (vel.y < 0 || this.flipTime < CAR.flipZDampEnd)) {
-        vel.y *= Math.pow(1 - CAR.flipZDamp120, dt * 120);
-      }
-    }
-    return allowAirControl;
   }
 
   // ---------------------------------------------------------------------------
   // Recovery: autoflip (jump while upside down) and autoroll (throttle while tilted)
   // ---------------------------------------------------------------------------
 
-  private updateAutoflip(input: CarInput, dt: number, jumpPressed: boolean): void {
-    if (this.autoflipTimer > 0) {
-      this.autoflipTimer -= dt;
-      angVel.addScaledVector(forward, CAR.autoflipTorque * this.autoflipSign * dt);
-      this.isAutoflipping = this.autoflipTimer > 0;
-      return;
+  private updateAutoflip(dt: number, jumpPressed: boolean): void {
+    if (jumpPressed && this.worldContact && contactNormal.y > CAR.autoflipNormalZThreshold) {
+      // Roll angle: positive when rolled to the right.
+      const roll = Math.atan2(-right.y, up.y);
+      const absRoll = Math.abs(roll);
+      if (absRoll > CAR.autoflipRollThreshold) {
+        this.autoflipTimer = CAR.autoflipTime * (absRoll / Math.PI);
+        this.autoflipSign = roll >= 0 ? 1 : -1;
+        this.isAutoflipping = true;
+        vel.addScaledVector(up, -CAR.autoflipImpulse);
+      }
     }
-    this.isAutoflipping = false;
 
-    if (!jumpPressed || !this.worldContact) return;
-    if (contactNormal.y <= CAR.autoflipNormalZThreshold) return;
-
-    // Roll angle: positive when rolled to the right.
-    const roll = Math.atan2(-right.y, up.y);
-    const absRoll = Math.abs(roll);
-    if (absRoll <= CAR.autoflipRollThreshold) return;
-
-    this.autoflipTimer = CAR.autoflipTime * (absRoll / Math.PI);
-    this.autoflipSign = roll >= 0 ? 1 : -1;
-    this.isAutoflipping = true;
-    vel.addScaledVector(up, -CAR.autoflipImpulse);
-    void input;
+    if (this.isAutoflipping) {
+      if (this.autoflipTimer <= 0) {
+        this.isAutoflipping = false;
+        this.autoflipTimer = 0;
+      } else {
+        angVel.addScaledVector(forward, CAR.autoflipTorque * this.autoflipSign * dt);
+        this.autoflipTimer -= dt;
+      }
+    }
   }
 
-  private autoroll(input: CarInput, dt: number): void {
-    if (Math.abs(input.throttle) < CAR.throttleDeadzone) return;
+  private autoroll(dt: number): void {
+    // Press into the surface and rotate the car's up toward the surface normal.
     const surfaceUp = this.numWheelsInContact > 0 ? groundUp : contactNormal;
     vel.addScaledVector(surfaceUp, -CAR.autorollForce * dt);
     const err = tmp.crossVectors(up, surfaceUp);
@@ -726,16 +771,15 @@ export class Car {
   // Boost and supersonic
   // ---------------------------------------------------------------------------
 
-  private updateBoost(input: CarInput, dt: number, willBoost: boolean): void {
+  private updateBoost(dt: number, willBoost: boolean): void {
+    if (this.infiniteBoost) this.boost = CAR.boostMax;
     if (!this.boosting && willBoost) this.boostingTime = 0;
     else if (this.boosting) this.boostingTime += dt;
     this.boosting = willBoost;
-    if (this.infiniteBoost) this.boost = CAR.boostMax;
     if (!this.boosting) return;
     const accel = this.grounded ? CAR.boostAccelGround : CAR.boostAccelAir;
     vel.addScaledVector(forward, accel * dt);
     if (!this.infiniteBoost) this.boost = Math.max(0, this.boost - CAR.boostUsedPerSecond * dt);
-    void input;
   }
 
   private updateSupersonic(speed: number, dt: number): void {

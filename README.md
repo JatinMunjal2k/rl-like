@@ -83,6 +83,10 @@ Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffnes
 - HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red, larger and pulsing at the 2300 uu/s cap; the boost flame goes white when supersonic.
 - The menu shows over black with the game not rendered.
 
+## Engine note: why flips come round a full turn
+
+RocketSim applies the flip torque before the physics step and clamps angular speed to 5.5 rad/s only after it, so each step's rotation integrates at 5.5 plus one tick of torque (about 7.7 rad/s for side flips, 7.4 for front flips). Over the 0.65 s torque phase that is ~285°, and the damped coast brings a flip to ~350° by landing. We replicate the order exactly: caps live in `Car.postStep`. Clamping before the step gave 270° flips that landed on their side.
+
 ## Engine note: gyroscopic precession
 
 Rapier integrates gyroscopic precession for the car's box inertia, so any rotation about a non-principal axis (every diagonal flip) would tumble and drift the heading. Bullet, and therefore Rocket League, does not. After each physics step, if nothing touched the car, its pre-step angular velocity is restored (`Car.postStep`).

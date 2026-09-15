@@ -138,28 +138,37 @@ export class Renderer {
     band.position.y = ARENA.goalHeight;
     this.scene.add(band);
 
-    // Goal boxes, tinted for the team defending them (orange defends +Z). The netting is drawn
-    // as translucent panels plus a grid of lines so the back of the goal reads as a net.
-    for (const b of arena.goalBoxes) {
-      const color = b.z > 0 ? 0xff9a3c : 0x4aa3ff;
-      const geo = new THREE.BoxGeometry(b.hx * 2, b.hy * 2, b.hz * 2);
-      const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.2, depthWrite: false }));
-      mesh.position.set(b.x, b.y, b.z);
-      this.scene.add(mesh);
-    }
-    for (const s of [-1, 1]) {
-      const color = s > 0 ? 0xff9a3c : 0x4aa3ff;
-      const lineMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.7 });
-      const mouth = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(ARENA.goalHalfWidth * 2, ARENA.goalHeight)), lineMat);
-      mouth.position.set(0, ARENA.goalHeight / 2, s * ARENA.extentY);
+    // Goal chambers straight from the physics mesh: quarter-pipe back, sloped roof, netting.
+    // Drawn as translucent tinted netting with edge lines so the curve reads from inside and out.
+    const goalGeo = new THREE.BufferGeometry();
+    goalGeo.setAttribute('position', new THREE.BufferAttribute(arena.goalVertices, 3));
+    goalGeo.setIndex(new THREE.BufferAttribute(arena.goalIndices, 1));
+    goalGeo.computeVertexNormals();
+    // Split by sign of z for team tints.
+    const tintByZ = (positive: boolean) => {
+      const idx = arena.goalIndices;
+      const kept: number[] = [];
+      for (let i = 0; i < idx.length; i += 3) {
+        const z = arena.goalVertices[idx[i] * 3 + 2];
+        if (z > 0 === positive) kept.push(idx[i], idx[i + 1], idx[i + 2]);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(arena.goalVertices, 3));
+      g.setIndex(kept);
+      g.computeVertexNormals();
+      return g;
+    };
+    for (const positive of [true, false]) {
+      const color = positive ? 0xff9a3c : 0x4aa3ff;
+      const g = tintByZ(positive);
+      this.scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false })));
+      this.scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(g, 12), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55 })));
+      const mouth = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.PlaneGeometry(ARENA.goalHalfWidth * 2, ARENA.goalHeight)),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.8 }),
+      );
+      mouth.position.set(0, ARENA.goalHeight / 2, (positive ? 1 : -1) * ARENA.extentY);
       this.scene.add(mouth);
-      // Net grid on the back panel.
-      const pts: number[] = [];
-      const zBack = s * (ARENA.extentY + ARENA.goalDepth - 0.05);
-      for (let x = -ARENA.goalHalfWidth; x <= ARENA.goalHalfWidth + 1e-6; x += ARENA.goalHalfWidth / 4) pts.push(x, 0, zBack, x, ARENA.goalHeight, zBack);
-      for (let y = 0; y <= ARENA.goalHeight + 1e-6; y += ARENA.goalHeight / 4) pts.push(-ARENA.goalHalfWidth, y, zBack, ARENA.goalHalfWidth, y, zBack);
-      const net = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 }));
-      this.scene.add(net);
     }
 
     // Ceiling outline only, so the camera never gets blocked.

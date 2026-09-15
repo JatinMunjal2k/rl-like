@@ -1,4 +1,4 @@
-import { ARENA } from './rl';
+import { ARENA, GOAL_PROFILE } from './rl';
 import { TUNING } from './tuning';
 
 /** Axis-aligned box (optionally rotated about Y): half extents and centre. */
@@ -16,9 +16,12 @@ export interface ArenaGeometry {
   /** Triangle mesh for the wall shell: ramps, walls, blended corners, back walls with goal mouths. Normals point into the arena. */
   vertices: Float32Array;
   indices: Uint32Array;
+  /** Triangle mesh of both goal chambers (side netting, quarter-pipe back, sloped roof, lintel). Normals point into the chamber. */
+  goalVertices: Float32Array;
+  goalIndices: Uint32Array;
   floorBox: Box;
   ceilingBox: Box;
-  /** The two goal boxes (back wall, two post walls, roof each). */
+  /** Solid slabs outside each goal chamber (behind the back curve, outside the netting, above the roof). */
   goalBoxes: Box[];
   /** Solid slabs behind every flat wall section so nothing can tunnel out through the thin shell. */
   backstopBoxes: Box[];
@@ -241,13 +244,93 @@ export function buildArenaGeometry(): ArenaGeometry {
   const floorBox: Box = { hx: W2 + t, hy: t / 2, hz: L2 + gd + t, x: 0, y: -t / 2, z: 0 };
   const ceilingBox: Box = { hx: W2 + t, hy: t / 2, hz: L2 + t, x: 0, y: H + t / 2, z: 0 };
 
+  // ---- Goal chambers ---------------------------------------------------------------
+  // Profile in (depth behind the mouth, height): floor → quarter-pipe back curling forward →
+  // sloped roof → flat lintel underside → mouth. Extruded across the goal width with side caps.
+  const G = GOAL_PROFILE;
+  const profile: P2[] = []; // [depth, height]
+  profile.push([0, 0]);
+  profile.push([G.backCurveCentreDepth, 0]);
+  const arcSteps = 10;
+  for (let k = 1; k <= arcSteps; k++) {
+    const ang = -Math.PI / 2 + ((Math.PI / 2 + G.backCurveEndAngle) * k) / arcSteps;
+    profile.push([G.backCurveCentreDepth + G.backCurveRadius * Math.cos(ang), G.backCurveCentreHeight + G.backCurveRadius * Math.sin(ang)]);
+  }
+  profile.push([G.roofFrontDepth, G.roofFrontHeight]);
+  profile.push([0, gh]);
+  const P = profile.length;
+
+  const gVerts: number[] = [];
+  const gIdx: number[] = [];
+  const gAdd = (x: number, y: number, z: number): number => {
+    gVerts.push(x, y, z);
+    return gVerts.length / 3 - 1;
+  };
+  for (const s of [-1, 1]) {
+    // Two rails of the profile at x = -gw and x = +gw.
+    const rail = (x: number) => profile.map(([d, h]) => gAdd(x, h, s * (L2 + d)));
+    const left = rail(-gw);
+    const right = rail(gw);
+    // Extruded surface between the rails (skip the first segment: that is the floor, handled by the floor box).
+    for (let k = 1; k < P - 1; k++) {
+      // Winding chosen so the normal points into the chamber (checked below and flipped if needed).
+      gIdx.push(left[k], right[k], right[k + 1]);
+      gIdx.push(left[k], right[k + 1], left[k + 1]);
+    }
+    // Side caps: fan from the profile centroid.
+    for (const [x, railIdx] of [
+      [-gw, left],
+      [gw, right],
+    ] as [number, number[]][]) {
+      let cd = 0;
+      let ch = 0;
+      for (const [d, h] of profile) {
+        cd += d;
+        ch += h;
+      }
+      const centre = gAdd(x, ch / P, s * (L2 + cd / P));
+      for (let k = 0; k < P; k++) {
+        const a = railIdx[k];
+        const b = railIdx[(k + 1) % P];
+        gIdx.push(centre, a, b);
+      }
+    }
+  }
+  // Orient every triangle so its normal faces the chamber interior (a point on the chamber axis).
+  for (let i = 0; i < gIdx.length; i += 3) {
+    const ia = gIdx[i];
+    const ib = gIdx[i + 1];
+    const ic = gIdx[i + 2];
+    const ax = gVerts[ia * 3];
+    const ay = gVerts[ia * 3 + 1];
+    const az = gVerts[ia * 3 + 2];
+    const ux = gVerts[ib * 3] - ax;
+    const uy = gVerts[ib * 3 + 1] - ay;
+    const uz = gVerts[ib * 3 + 2] - az;
+    const vx = gVerts[ic * 3] - ax;
+    const vy = gVerts[ic * 3 + 1] - ay;
+    const vz = gVerts[ic * 3 + 2] - az;
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    const s = Math.sign(az);
+    const cx = 0;
+    const cy = gh / 2;
+    const cz = s * (L2 + gd * 0.45);
+    if (nx * (cx - ax) + ny * (cy - ay) + nz * (cz - az) < 0) {
+      gIdx[i + 1] = ic;
+      gIdx[i + 2] = ib;
+    }
+  }
+
+  // Slabs outside the chamber so nothing tunnels out through the thin netting.
   const goalBoxes: Box[] = [];
   for (const s of [-1, 1]) {
     const zc = s * (L2 + (gd + t) / 2);
-    goalBoxes.push({ hx: gw + t, hy: gh / 2 + t, hz: t / 2, x: 0, y: gh / 2, z: s * (L2 + gd + t / 2) }); // back
-    goalBoxes.push({ hx: t / 2, hy: gh / 2 + t, hz: (gd + t) / 2, x: -(gw + t / 2), y: gh / 2, z: zc }); // left post wall
-    goalBoxes.push({ hx: t / 2, hy: gh / 2 + t, hz: (gd + t) / 2, x: gw + t / 2, y: gh / 2, z: zc }); // right post wall
-    goalBoxes.push({ hx: gw + t, hy: t / 2, hz: (gd + t) / 2, x: 0, y: gh + t / 2, z: zc }); // roof
+    goalBoxes.push({ hx: gw + t, hy: gh / 2 + t, hz: t / 2, x: 0, y: gh / 2, z: s * (L2 + gd + t / 2) }); // behind the back curve
+    goalBoxes.push({ hx: t / 2, hy: gh / 2 + t, hz: (gd + t) / 2, x: -(gw + t / 2), y: gh / 2, z: zc }); // outside left netting
+    goalBoxes.push({ hx: t / 2, hy: gh / 2 + t, hz: (gd + t) / 2, x: gw + t / 2, y: gh / 2, z: zc }); // outside right netting
+    goalBoxes.push({ hx: gw + t, hy: t / 2, hz: (gd + t) / 2, x: 0, y: gh + 0.02 + t / 2, z: zc }); // above the roof
   }
 
   // Backstops sit flush behind each wall plane; ramps and blends are inset from those planes so they never touch.
@@ -283,6 +366,8 @@ export function buildArenaGeometry(): ArenaGeometry {
   return {
     vertices: new Float32Array(verts),
     indices: new Uint32Array(idx),
+    goalVertices: new Float32Array(gVerts),
+    goalIndices: new Uint32Array(gIdx),
     floorBox,
     ceilingBox,
     goalBoxes,

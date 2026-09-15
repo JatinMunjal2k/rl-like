@@ -9,6 +9,8 @@
  *         src/Sim/Car/CarConfig/CarConfig.cpp, src/Sim/btVehicleRL/btVehicleRL.cpp
  *         https://github.com/ZealanL/RocketSim (reverse-engineered, tick-accurate sim)
  *   [WIKI] RLBot "Useful game values": https://wiki.rlbot.org/v4/botmaking/useful-game-values/
+ *   [MESH] Measured from RL's arena collision mesh (RocketSim .cmf format, 1 BT = 50 uu). The
+ *          mesh itself is Psyonix's and is not part of this repo; only the measurements are.
  *
  * Everything approximate or invented lives in ./tuning.ts instead.
  */
@@ -35,13 +37,36 @@ export const ARENA = {
   cornerPlane: 8064 * UU,
   cornerCut: (4096 + 5120 - 8064) * UU, // = 1152 uu
   cornerWallLength: 1629.174 * UU, // [WIKI] = 1152 * sqrt(2)
-  goalHalfWidth: 892.755 * UU, // [WIKI] goal centre-to-post
-  goalHeight: 642.775 * UU, // [WIKI]
-  goalDepth: 880 * UU, // [WIKI]
+  /** [MESH] goal interior half-width; the collision mesh's side netting is at x = ±896 ([WIKI] quotes 892.755 centre-to-post). */
+  goalHalfWidth: 896 * UU,
+  /** [MESH] underside of the crossbar lintel; [WIKI] quotes 642.775. */
+  goalHeight: 640 * UU,
+  goalDepth: 880 * UU, // [WIKI][MESH] back of the net at y = ±6000
   /** [RS] SOCCAR_GOAL_SCORE_BASE_THRESHOLD_Y: goal when |ball.y| > this + ball radius. */
   goalScoreThresholdY: 5124.25 * UU,
   collisionFriction: 0.6, // [RS] ARENA_COLLISION_BASE_FRICTION
   collisionRestitution: 0.3, // [RS] ARENA_COLLISION_BASE_RESTITUTION
+};
+
+/**
+ * [MESH] Goal interior profile, measured from RL's collision mesh, as (depth behind the mouth
+ * plane, height) in uu. The chamber is a tube a car can ride: flat floor, a quarter-pipe back
+ * (radius 256 centred 624 uu behind the mouth at height 256) that curls forward past vertical,
+ * a roof sloping from the top of that curl (477 high, 733 deep) up to 640 at 224 deep, then the
+ * flat underside of the crossbar lintel (640) out to the mouth. Side netting is vertical at ±896.
+ */
+export const GOAL_PROFILE = {
+  backCurveRadius: 256 * UU,
+  backCurveCentreDepth: 624 * UU,
+  backCurveCentreHeight: 256 * UU,
+  /** Angle above horizontal at which the back curve hands over to the roof (top point 733 deep, 477 high). */
+  backCurveEndAngle: Math.atan2(477 - 256, 733 - 624),
+  roofBackDepth: 733 * UU,
+  roofBackHeight: 477 * UU,
+  roofFrontDepth: 224 * UU,
+  roofFrontHeight: 640 * UU,
+  /** Rounding of the roof/side corners (skipped in the analytic mesh). */
+  cornerFilletRadius: 96 * UU,
 };
 
 // ---------------------------------------------------------------------------------

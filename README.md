@@ -68,7 +68,8 @@ The car follows RocketSim's reverse-engineered vehicle:
 - RocketSim's "extra pushback" when a wheel ray sinks into geometry is omitted; Rapier's hitbox collision covers it.
 - Autoroll torque is a proportional alignment instead of RL's torque through the inertia tensor.
 - Car-ball restitution ends at 0.18 (RL 0.0); friction is exact (2.0).
-- Arena shape is fitted to measurements of RL's real collision mesh (parsed from RocketSim `.cmf` files, not redistributed): side-wall and corner floor ramps r = 256 uu, back-wall floor ramps r = 160, wall-to-ceiling arcs r = 550, corner walls on |x|+|y| = 8064 blended into the back wall (r ≈ 800) and side wall (r ≈ 680). Built from flat facets. Still square: the goal's interior corners and the ~100 uu fillet where posts meet the back-wall ramp.
+- Arena shape is fitted to measurements of RL's real collision mesh (parsed from RocketSim `.cmf` files, not redistributed): side-wall and corner floor ramps r = 256 uu, back-wall floor ramps r = 160, wall-to-ceiling arcs r = 550, corner walls on |x|+|y| = 8064 blended into the back wall (r ≈ 800) and side wall (r ≈ 680).
+- The goal is a tube, not a box: netting at x = ±896, a quarter-pipe back (r = 256, centred 624 uu behind the mouth) that curls forward past vertical to 477 high, a roof sloping up to 640 at 224 uu behind the crossbar, then the flat lintel to the mouth. Drive in fast and you ride up the back, along the roof upside down, and out through the mouth, as in RL. Still square: the ~96 uu fillets where the roof meets the netting and where posts meet the back-wall ramp.
 
 ## Visuals and sound
 

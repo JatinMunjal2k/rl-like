@@ -347,6 +347,8 @@ export class Game {
     // ORIENTED: the shell's normals point into the arena, so deep penetrations still push inward.
     const flags = RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES | RAPIER.TriMeshFlags.ORIENTED;
     this.world.createCollider(material(RAPIER.ColliderDesc.trimesh(this.arena.vertices, this.arena.indices, flags)), ground);
+    // Goal chambers: netting, quarter-pipe back and sloped roof, normals into the chamber.
+    this.world.createCollider(material(RAPIER.ColliderDesc.trimesh(this.arena.goalVertices, this.arena.goalIndices, flags)), ground);
     for (const b of allColliderBoxes(this.arena)) {
       const desc = RAPIER.ColliderDesc.cuboid(b.hx, b.hy, b.hz).setTranslation(b.x, b.y, b.z);
       if (b.yaw) desc.setRotation({ x: 0, y: Math.sin(b.yaw / 2), z: 0, w: Math.cos(b.yaw / 2) });

@@ -62,9 +62,10 @@ export const TUNING = {
    * the game files). These radii were MEASURED from that mesh: side-wall floor ramp and corner ramps
    * are circular r = 256; the back-wall floor ramp is smaller, r = 160; every wall meets the ceiling
    * with an r = 550 arc; the flat 45° corner wall on |x|+|y| = 8064 blends into the back wall with an
-   * ~800 arc and into the side wall with an ~680 arc. Our analytic mesh reproduces those with flat
-   * facets. Still approximate: the fillet where the goal posts meet the back-wall ramp (~100 uu) and
-   * the goal's own interior corners are square here.
+   * ~800 arc and into the side wall with an ~680 arc. The goal is a tube (see GOAL_PROFILE in
+   * rl.ts): quarter-pipe back r = 256 curling forward, roof sloping 477 → 640, flat lintel. Our
+   * analytic mesh reproduces those with flat facets. Still approximate: the ~96 uu fillets where
+   * the goal roof meets the netting and where the posts meet the back-wall ramp are square here.
    */
   arenaSideRampRadius: 256 * UU,
   arenaBackRampRadius: 160 * UU,

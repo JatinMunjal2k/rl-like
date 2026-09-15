@@ -5,6 +5,7 @@ import type { ArenaGeometry } from '../sim/arena';
 import type { BodyState, BoostPad } from '../sim/game';
 import type { Team } from '../sim/car';
 import type { CarRenderState } from '../net/session';
+import { BlobShadow, Explosion, Ribbon, glowTexture } from './effects';
 
 const pA = new THREE.Vector3();
 const pB = new THREE.Vector3();
@@ -22,6 +23,19 @@ interface CarVisual {
   flameMaterial: THREE.MeshBasicMaterial;
   nameplate: THREE.Sprite | null;
   name: string;
+  trail: Ribbon;
+  shadow: BlobShadow;
+}
+
+/** Per-pad bookkeeping for the instanced orbs and rings; big pads also get a glow sprite. */
+interface PadVisual {
+  x: number;
+  z: number;
+  big: boolean;
+  /** Instance index within the big or small instanced meshes. */
+  index: number;
+  halo: THREE.Sprite | null;
+  phase: number;
 }
 
 /**
@@ -34,10 +48,22 @@ export class Renderer {
   readonly gl: THREE.WebGLRenderer;
   readonly ballMesh: THREE.Mesh;
   private readonly cars = new Map<number, CarVisual>();
-  private padMeshes: THREE.Mesh[] = [];
-  private readonly padActiveBig = new THREE.MeshBasicMaterial({ color: 0xffb347 });
-  private readonly padActiveSmall = new THREE.MeshBasicMaterial({ color: 0xffd98a });
-  private readonly padInactive = new THREE.MeshBasicMaterial({ color: 0x2a3a2a });
+  private pads: PadVisual[] = [];
+  private bigOrbs!: THREE.InstancedMesh;
+  private smallOrbs!: THREE.InstancedMesh;
+  private bigRings!: THREE.InstancedMesh;
+  private smallRings!: THREE.InstancedMesh;
+  private readonly padMatrix = new THREE.Matrix4();
+  private readonly padColorOn = new THREE.Color(0xffc46b);
+  private readonly padColorOff = new THREE.Color(0x2f3d33);
+  private readonly ballTrail = new Ribbon(16, 0.42, 0xdfe8ff, 0.28, 0.7);
+  private readonly ballGlow: THREE.Sprite;
+  private readonly ballShadow = new BlobShadow(1.1, 9);
+  private readonly explosions: Explosion[] = [];
+  private readonly lastBallPos = new THREE.Vector3();
+  private readonly prevBallPos = new THREE.Vector3();
+  private padTime = 0;
+  private readonly tmpV = new THREE.Vector3();
 
   constructor(container: HTMLElement, arena: ArenaGeometry, pads: BoostPad[]) {
     this.gl = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'low-power' });
@@ -47,7 +73,7 @@ export class Renderer {
     container.appendChild(this.gl.domElement);
 
     this.camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 300);
-    this.scene.background = new THREE.Color(0x0b1220);
+    this.scene.background = new THREE.Color(0x05080f);
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const sun = new THREE.DirectionalLight(0xffffff, 1.3);
@@ -57,9 +83,15 @@ export class Renderer {
     fill.position.set(-40, 30, -50);
     this.scene.add(fill);
 
+    this.buildSky();
     this.buildArena(arena);
     this.buildPads(pads);
     this.ballMesh = this.buildBall();
+    this.ballGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0x9fb8ff, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false }));
+    this.ballGlow.scale.setScalar(3.2);
+    this.scene.add(this.ballGlow);
+    this.scene.add(this.ballTrail.mesh);
+    this.scene.add(this.ballShadow.mesh);
 
     window.addEventListener('resize', () => this.resize(container));
   }
@@ -112,6 +144,12 @@ export class Renderer {
       v.flame.visible = s.boosting;
       v.flameMaterial.color.setHex(s.supersonic ? 0xfff3d6 : 0xffa62b);
       v.flame.scale.setScalar(s.supersonic ? 1.5 : 1);
+      if (s.boosting) {
+        v.flame.getWorldPosition(this.tmpV);
+        v.trail.addPoint(this.tmpV);
+      }
+      v.trail.update(dt, this.camera.position);
+      v.shadow.update(v.group.position, true);
     }
     for (const id of [...this.cars.keys()]) if (!seen.has(id)) this.removeCar(id);
   }
@@ -120,23 +158,73 @@ export class Renderer {
     const v = this.cars.get(id);
     if (!v) return;
     this.scene.remove(v.group);
+    this.scene.remove(v.trail.mesh);
+    this.scene.remove(v.shadow.mesh);
     this.cars.delete(id);
   }
 
-  syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null): void {
+  syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null, dt: number): void {
     applyInterpolated(this.ballMesh, prev, curr, alpha);
     if (offset) this.ballMesh.position.add(offset);
     this.ballMesh.visible = visible;
+    this.ballGlow.visible = visible;
+    this.ballGlow.position.copy(this.ballMesh.position);
+    if (visible) {
+      this.lastBallPos.copy(this.ballMesh.position);
+      // Streak only when the ball is really moving (RL shows it past roughly half max speed).
+      const speed = dt > 0 ? this.ballMesh.position.distanceTo(this.prevBallPos) / dt : 0;
+      if (speed > 14 && speed < 200) this.ballTrail.addPoint(this.ballMesh.position);
+      this.prevBallPos.copy(this.ballMesh.position);
+    } else this.ballTrail.clear();
+    this.ballTrail.update(dt, this.camera.position);
+    this.ballShadow.update(this.ballMesh.position, visible);
   }
 
-  syncPads(pads: BoostPad[]): void {
+  syncPads(pads: BoostPad[], dt: number): void {
+    this.padTime += dt;
     for (let i = 0; i < pads.length; i++) {
       const p = pads[i];
-      this.padMeshes[i].material = p.cooldown > 0 ? this.padInactive : p.big ? this.padActiveBig : this.padActiveSmall;
+      const v = this.pads[i];
+      const active = p.cooldown === 0;
+      const orbs = v.big ? this.bigOrbs : this.smallOrbs;
+      const rings = v.big ? this.bigRings : this.smallRings;
+      // Gentle bob so the orbs read as floating pickups; hidden by scaling to nothing.
+      const bob = Math.sin(this.padTime * 2 + v.phase) * (v.big ? 0.12 : 0.05);
+      const y = (v.big ? 1.15 : 0.32) + bob;
+      const sc = active ? 1 : 0;
+      this.padMatrix.makeRotationY(v.big ? this.padTime * 0.8 + v.phase : 0);
+      this.padMatrix.scale(new THREE.Vector3(sc, sc, sc));
+      this.padMatrix.setPosition(v.x, y, v.z);
+      orbs.setMatrixAt(v.index, this.padMatrix);
+      rings.setColorAt(v.index, active ? this.padColorOn : this.padColorOff);
+      if (v.halo) {
+        v.halo.visible = active;
+        v.halo.position.y = y;
+      }
     }
+    this.bigOrbs.instanceMatrix.needsUpdate = true;
+    this.smallOrbs.instanceMatrix.needsUpdate = true;
+    if (this.bigRings.instanceColor) this.bigRings.instanceColor.needsUpdate = true;
+    if (this.smallRings.instanceColor) this.smallRings.instanceColor.needsUpdate = true;
   }
 
-  render(): void {
+  /** Goal scored: burst at the ball's last visible position in the team's colour. */
+  goalExplosion(team: Team): void {
+    const e = new Explosion(this.lastBallPos, TEAM_PAINT[team]);
+    this.explosions.push(e);
+    this.scene.add(e.group);
+  }
+
+  render(dt = 0): void {
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const e = this.explosions[i];
+      e.update(dt);
+      if (e.done) {
+        this.scene.remove(e.group);
+        e.dispose();
+        this.explosions.splice(i, 1);
+      }
+    }
     this.gl.render(this.scene, this.camera);
   }
 
@@ -219,17 +307,86 @@ export class Renderer {
     this.scene.add(ceil);
   }
 
-  /** Flat discs on the floor: lit when available, dark while cooling down. */
+  /**
+   * RL-style pickups: big pads float a glowing orb about a metre up, small pads a bright dot,
+   * each on a ring that goes dark while the pad recharges. Four instanced meshes plus six glow
+   * sprites for the big pads: ten draw calls for all 34 pads.
+   */
   private buildPads(pads: BoostPad[]): void {
-    const bigGeo = new THREE.CircleGeometry(1.6, 24);
-    const smallGeo = new THREE.CircleGeometry(0.9, 16);
-    this.padMeshes = pads.map((p) => {
-      const mesh = new THREE.Mesh(p.big ? bigGeo : smallGeo, p.big ? this.padActiveBig : this.padActiveSmall);
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.set(p.x, 0.02, p.z);
-      this.scene.add(mesh);
-      return mesh;
+    const bigs = pads.filter((p) => p.big).length;
+    const smalls = pads.length - bigs;
+    const ringMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85, side: THREE.DoubleSide });
+    this.bigOrbs = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.42, 1), new THREE.MeshBasicMaterial({ color: 0xffc24a }), bigs);
+    this.smallOrbs = new THREE.InstancedMesh(new THREE.SphereGeometry(0.16, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe08a }), smalls);
+    this.bigRings = new THREE.InstancedMesh(new THREE.RingGeometry(1.35, 1.6, 32), ringMat, bigs);
+    this.smallRings = new THREE.InstancedMesh(new THREE.RingGeometry(0.7, 0.85, 20), ringMat, smalls);
+    for (const m of [this.bigOrbs, this.smallOrbs, this.bigRings, this.smallRings]) {
+      m.frustumCulled = false;
+      this.scene.add(m);
+    }
+    const haloTex = glowTexture();
+    let bi = 0;
+    let si = 0;
+    const m = new THREE.Matrix4();
+    this.pads = pads.map((p, i) => {
+      const index = p.big ? bi++ : si++;
+      const rings = p.big ? this.bigRings : this.smallRings;
+      m.makeRotationX(-Math.PI / 2);
+      m.setPosition(p.x, 0.015, p.z);
+      rings.setMatrixAt(index, m);
+      rings.setColorAt(index, this.padColorOn);
+      let halo: THREE.Sprite | null = null;
+      if (p.big) {
+        halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: haloTex, color: 0xffa030, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+        halo.scale.setScalar(2.6);
+        halo.position.set(p.x, 1.15, p.z);
+        this.scene.add(halo);
+      }
+      return { x: p.x, z: p.z, big: p.big, index, halo, phase: i * 0.7 };
     });
+    this.bigRings.instanceMatrix.needsUpdate = true;
+    this.smallRings.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Night sky: a dithered gradient dome instead of a flat colour, one draw call. */
+  private buildSky(): void {
+    const cv = document.createElement('canvas');
+    cv.width = 64;
+    cv.height = 1024;
+    const ctx = cv.getContext('2d')!;
+    const img = ctx.createImageData(cv.width, cv.height);
+    // Horizon (bottom of the texture, v = 0) to zenith. Per-pixel noise breaks the 8-bit banding
+    // that a smooth near-black gradient shows on a sphere as concentric rings.
+    const stops: [number, [number, number, number]][] = [
+      [0, [30, 42, 70]],
+      [0.3, [16, 24, 44]],
+      [1, [4, 6, 12]],
+    ];
+    for (let y = 0; y < cv.height; y++) {
+      const v = 1 - y / (cv.height - 1);
+      let i = 0;
+      while (i < stops.length - 2 && v > stops[i + 1][0]) i++;
+      const [v0, c0] = stops[i];
+      const [v1, c1] = stops[i + 1];
+      const t = Math.min(1, Math.max(0, (v - v0) / (v1 - v0)));
+      for (let x = 0; x < cv.width; x++) {
+        const n = (Math.random() - 0.5) * 3;
+        const o = (y * cv.width + x) * 4;
+        img.data[o] = c0[0] + (c1[0] - c0[0]) * t + n;
+        img.data[o + 1] = c0[1] + (c1[1] - c0[1]) * t + n;
+        img.data[o + 2] = c0[2] + (c1[2] - c0[2]) * t + n;
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    // A sprinkle of stars in the upper half.
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    for (let i = 0; i < 90; i++) ctx.fillRect(Math.random() * cv.width, Math.random() * 500, 1, 1);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sky = new THREE.Mesh(new THREE.SphereGeometry(240, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, depthWrite: false, fog: false }));
+    sky.renderOrder = -10;
+    this.scene.add(sky);
   }
 
   // ---------------------------------------------------------------------------
@@ -304,8 +461,10 @@ export class Renderer {
     flame.visible = false;
     body.add(flame);
 
-    this.scene.add(group);
-    return { group, team, wheels, flame, flameMaterial, nameplate: null, name: '' };
+    const trail = new Ribbon(10, 0.13, team === 'blue' ? 0x4f8cff : 0xff9030, 0.11, 0.55);
+    const shadow = new BlobShadow(0.95, 6);
+    this.scene.add(group, trail.mesh, shadow.mesh);
+    return { group, team, wheels, flame, flameMaterial, nameplate: null, name: '', trail, shadow };
   }
 
   private buildBall(): THREE.Mesh {
@@ -460,7 +619,11 @@ function makeFieldTexture(fieldW: number, fieldL: number): THREE.Texture {
   return tex;
 }
 
-/** Static wall texture: dark panels with seams, a light rail at goal height, a glow strip near the top. Tiles along u. */
+/**
+ * Static wall texture: glass with a hexagon mesh (RL's arena glass) over a baked stadium behind it:
+ * dark field-level band, three tiers of seating rendered as coloured speckle, roof structure at the
+ * top, a light rail at goal height. Tiles along u.
+ */
 function makeWallTexture(): THREE.Texture {
   const W = 512;
   const H = 1024;
@@ -471,51 +634,88 @@ function makeWallTexture(): THREE.Texture {
   // v = 0 at the floor is the bottom of the canvas.
   const yPx = (frac: number) => H - frac * H;
   const grad = ctx.createLinearGradient(0, H, 0, 0);
-  grad.addColorStop(0, '#1e2a40');
-  grad.addColorStop(0.35, '#273550');
-  grad.addColorStop(1, '#1a2438');
+  grad.addColorStop(0, '#1b2538');
+  grad.addColorStop(0.2, '#141c2c');
+  grad.addColorStop(0.75, '#101625');
+  grad.addColorStop(1, '#070a12');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
-  // Panel seams: two panels per tile horizontally, rows at fixed heights.
-  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-  ctx.lineWidth = 4;
-  for (const u of [0, W / 2]) {
+
+  // Seating tiers behind the glass: speckled crowd in muted colours, separated by walkways.
+  let seed = 7;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const tiers: [number, number][] = [
+    [0.22, 0.36],
+    [0.42, 0.56],
+    [0.62, 0.74],
+  ];
+  // Soft, low-contrast speckle: it should read as a distant crowd, not as noise up close.
+  const palette = ['rgba(120,132,160,0.35)', 'rgba(100,110,140,0.3)', 'rgba(150,160,185,0.3)', 'rgba(160,130,110,0.28)', 'rgba(90,100,125,0.3)'];
+  for (const [lo, hi] of tiers) {
+    ctx.fillStyle = '#121a2a';
+    ctx.fillRect(0, yPx(hi), W, (hi - lo) * H);
+    for (let y = yPx(hi) + 6; y < yPx(lo) - 6; y += 10) {
+      for (let x = 0; x < W; x += 9) {
+        if (rnd() < 0.7) {
+          ctx.fillStyle = palette[Math.floor(rnd() * palette.length)];
+          ctx.fillRect(x + rnd() * 3, y + rnd() * 3, 5, 5);
+        }
+      }
+    }
+    // Walkway rail above each tier.
+    ctx.fillStyle = 'rgba(180,200,235,0.18)';
+    ctx.fillRect(0, yPx(hi) - 3, W, 3);
+  }
+  // Roof structure near the top.
+  ctx.strokeStyle = 'rgba(120,140,180,0.25)';
+  ctx.lineWidth = 6;
+  for (let x = 0; x <= W; x += W / 4) {
     ctx.beginPath();
-    ctx.moveTo(u, 0);
-    ctx.lineTo(u, H);
+    ctx.moveTo(x, yPx(0.78));
+    ctx.lineTo(x + W / 8, yPx(1));
+    ctx.moveTo(x, yPx(0.78));
+    ctx.lineTo(x - W / 8, yPx(1));
     ctx.stroke();
   }
-  for (const frac of [0.15, 0.31, 0.5, 0.72]) {
-    ctx.beginPath();
-    ctx.moveTo(0, yPx(frac));
-    ctx.lineTo(W, yPx(frac));
-    ctx.stroke();
-  }
-  // Highlight edge on each seam.
-  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+
+  // Glass: hexagon mesh over everything, slightly brighter near the floor where the glass is lit.
+  const r = 30;
+  const dx = r * Math.sqrt(3);
+  const dy = r * 1.5;
   ctx.lineWidth = 2;
-  for (const frac of [0.15, 0.31, 0.5, 0.72]) {
-    ctx.beginPath();
-    ctx.moveTo(0, yPx(frac) - 3);
-    ctx.lineTo(W, yPx(frac) - 3);
-    ctx.stroke();
+  let row = 0;
+  for (let y = H + r; y > -r; y -= dy, row++) {
+    for (let x = row % 2 ? dx / 2 : 0; x < W + dx; x += dx) {
+      const frac = 1 - y / H;
+      ctx.strokeStyle = `rgba(160,190,240,${(0.16 - frac * 0.1).toFixed(3)})`;
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = (Math.PI / 3) * k + Math.PI / 6;
+        const px = x + r * Math.cos(a);
+        const py = y + r * Math.sin(a);
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
   }
-  // Glass rail at goal height and a glow strip near the ceiling curve.
+  // Glass tint reflections: faint diagonal sheen.
+  const sheen = ctx.createLinearGradient(0, H, W, 0);
+  sheen.addColorStop(0, 'rgba(255,255,255,0)');
+  sheen.addColorStop(0.5, 'rgba(255,255,255,0.045)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sheen;
+  ctx.fillRect(0, 0, W, H);
+  // Rail at goal height and the glow strip near the ceiling curve.
   const goalFrac = ARENA.goalHeight / ARENA.height;
-  ctx.fillStyle = 'rgba(143,184,255,0.35)';
-  ctx.fillRect(0, yPx(goalFrac) - 5, W, 10);
-  ctx.fillStyle = 'rgba(255,179,71,0.25)';
-  ctx.fillRect(0, yPx(0.68) - 6, W, 12);
-  // Subtle vertical light streaks.
-  for (let i = 0; i < 6; i++) {
-    const x = ((i + 0.5) * W) / 6;
-    const g = ctx.createLinearGradient(0, H, 0, 0);
-    g.addColorStop(0, 'rgba(255,255,255,0)');
-    g.addColorStop(0.4, 'rgba(255,255,255,0.035)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(x - 6, 0, 12, H);
-  }
+  ctx.fillStyle = 'rgba(143,184,255,0.45)';
+  ctx.fillRect(0, yPx(goalFrac) - 4, W, 8);
+  ctx.fillStyle = 'rgba(255,179,71,0.22)';
+  ctx.fillRect(0, yPx(0.78) - 5, W, 10);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = THREE.RepeatWrapping;
@@ -524,17 +724,36 @@ function makeWallTexture(): THREE.Texture {
   return tex;
 }
 
+/** RL-like ball: light grey with darker hexagon panel seams and a few darker panels. */
 function makeBallTexture(): THREE.Texture {
   const cv = document.createElement('canvas');
-  cv.width = 256;
-  cv.height = 128;
+  cv.width = 512;
+  cv.height = 256;
   const ctx = cv.getContext('2d')!;
-  const cols = 12;
-  const rows = 6;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      ctx.fillStyle = (r + c) % 2 ? '#e9eef3' : '#3a4a5c';
-      ctx.fillRect((c * cv.width) / cols, (r * cv.height) / rows, cv.width / cols, cv.height / rows);
+  ctx.fillStyle = '#cfd6de';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const r = 22;
+  const dx = r * Math.sqrt(3);
+  const dy = r * 1.5;
+  let row = 0;
+  for (let y = -r; y < cv.height + r; y += dy, row++) {
+    for (let x = row % 2 ? dx / 2 : 0; x < cv.width + dx; x += dx) {
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = (Math.PI / 3) * k + Math.PI / 6;
+        const px = x + r * Math.cos(a);
+        const py = y + r * Math.sin(a);
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      // Every few panels darker, like the ball's pattern.
+      const h = (Math.round(x / dx) * 7 + row * 3) % 11;
+      ctx.fillStyle = h < 2 ? '#6b7683' : h < 4 ? '#aeb8c4' : '#d6dce3';
+      ctx.fill();
+      ctx.strokeStyle = '#3d4753';
+      ctx.lineWidth = 3;
+      ctx.stroke();
     }
   }
   const tex = new THREE.CanvasTexture(cv);

@@ -225,7 +225,7 @@ async function main(): Promise<void> {
   let lastSessionUpdate = performance.now();
   let lastFrameAt = performance.now();
   const sessionDt = (now: number): number => {
-    const dt = Math.min((now - lastSessionUpdate) / 1000, 0.1);
+    const dt = Math.max(0, Math.min((now - lastSessionUpdate) / 1000, 0.1));
     lastSessionUpdate = now;
     return dt;
   };
@@ -262,10 +262,15 @@ async function main(): Promise<void> {
   // Sound event tracking (frame-level edges).
   let prevJumping = false;
   let prevGrounded = true;
+  let prevDoubleJumped = false;
+  let prevFlipping = false;
+  let prevBoosting = false;
+  let prevVy = 0;
   let airTime = 0;
   let prevWorldContact = false;
   let prevPadCooldowns: number[] = [];
   let prevScoreTotal = 0;
+  let countdownSound: 0 | 1 | 2 = 0;
 
   const resetFrameTimers = () => {
     last = performance.now();
@@ -287,8 +292,9 @@ async function main(): Promise<void> {
     bannerUntil = 0;
   };
 
-  const frame = (now: number): void => {
-    const frameDt = Math.min((now - last) / 1000, 0.1);
+  /** One frame of input, simulation, rendering and HUD. `frame` schedules it; `__step` runs it by hand. */
+  const tick = (now: number): void => {
+    const frameDt = Math.max(0, Math.min((now - last) / 1000, 0.1));
     last = now;
     lastFrameAt = now;
 
@@ -307,7 +313,6 @@ async function main(): Promise<void> {
     const localCar = game?.cars.get(session!.localId) ?? null;
     if (menu.open || !session || !game || !localCar) {
       hudEl.hidden = true;
-      requestAnimationFrame(frame);
       return;
     }
     hudEl.hidden = false;
@@ -335,14 +340,12 @@ async function main(): Promise<void> {
     // --- Render ----------------------------------------------------------------------
     const carStates = s.carRenderStates();
     renderer.syncCars(carStates, s.localId, frameDt);
-    renderer.syncBall(game.prev.ball, game.curr.ball, s.alpha, game.ballVisible, s.ballOffset());
-    renderer.syncPads(game.pads);
+    renderer.syncBall(game.prev.ball, game.curr.ball, s.alpha, game.ballVisible, s.ballOffset(), frameDt);
+    renderer.syncPads(game.pads, frameDt);
     const carObj = renderer.carObject(s.localId);
     if (carObj) {
-      const q = carObj.quaternion;
-      const upY = 1 - 2 * (q.x * q.x + q.z * q.z);
-      followCam.update(renderer.camera, carObj, renderer.ballMesh, { holdHeading: localCar.isFlipping || Math.abs(upY) < 0.35 }, frameDt);
-      renderer.render();
+      followCam.update(renderer.camera, carObj, renderer.ballMesh, { holdHeading: localCar.isFlipping, grounded: localCar.grounded }, frameDt);
+      renderer.render(frameDt);
     }
 
     // --- Sound events from state edges -------------------------------------------------
@@ -350,7 +353,21 @@ async function main(): Promise<void> {
     const grounded = localCar.grounded;
     const jumped = localCar.isJumping && !prevJumping;
     const landed = grounded && !prevGrounded && airTime > 0.25;
+    const landedSpeedUU = landed ? Math.max(200, -prevVy / UU) : 0;
     airTime = grounded ? 0 : airTime + frameDt;
+    const doubleJumped = localCar.doubleJumped && !prevDoubleJumped;
+    const dodged = localCar.isFlipping && !prevFlipping;
+    // Tyre slip: sideways speed on the ground, boosted by the powerslide.
+    const cq = carObj ? carObj.quaternion : null;
+    let skid = 0;
+    if (grounded && cq) {
+      const rx = 1 - 2 * (cq.y * cq.y + cq.z * cq.z);
+      const ry = 2 * (cq.x * cq.y + cq.w * cq.z);
+      const rz = 2 * (cq.x * cq.z - cq.w * cq.y);
+      const lateral = Math.abs(lvNow.x * rx + lvNow.y * ry + lvNow.z * rz);
+      skid = Math.min(1, lateral / 6) * (0.35 + 0.65 * localCar.handbrakeVal);
+      if (lateral < 1.5) skid *= lateral / 1.5;
+    }
     let padCollected: 0 | 1 | 2 = 0;
     if (prevPadCooldowns.length !== game.pads.length) prevPadCooldowns = game.pads.map((p) => p.cooldown);
     for (let i = 0; i < game.pads.length; i++) {
@@ -367,17 +384,28 @@ async function main(): Promise<void> {
       speedUU: Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU,
       throttle: fi.car.throttle,
       boosting: localCar.boosting,
+      boostStarted: localCar.boosting && !prevBoosting,
       grounded,
+      supersonic: localCar.supersonic,
       jumped,
-      landed,
+      doubleJumped,
+      dodged,
+      landedSpeedUU,
+      skid,
       padCollected,
       ballHitSpeedUU: game.ballHitRelSpeed / UU,
       ballBounceSpeedUU: game.ballBounceDeltaV / UU,
       goal: scoreTotal > prevScoreTotal,
       wallHitSpeedUU: wallHit,
+      countdown: countdownSound,
     });
+    countdownSound = 0;
     prevJumping = localCar.isJumping;
     prevGrounded = grounded;
+    prevDoubleJumped = localCar.doubleJumped;
+    prevFlipping = localCar.isFlipping;
+    prevBoosting = localCar.boosting;
+    prevVy = lvNow.y;
     prevWorldContact = localCar.worldContact;
     prevScoreTotal = scoreTotal;
 
@@ -433,6 +461,7 @@ async function main(): Promise<void> {
       lastScore = scoreText;
       scoreEl.innerHTML = `<span class="blue">BLUE ${game.score.blue}</span> &nbsp;–&nbsp; <span class="orange">${game.score.orange} ORANGE</span>`;
       if (game.lastGoal && scoreTotal > 0) {
+        renderer.goalExplosion(game.lastGoal);
         const kmh = Math.round((game.lastGoalSpeed / UU) * UU_S_TO_KMH);
         const mine = game.lastGoalScorer === s.localId;
         const scorer = carStates.find((c) => c.id === game.lastGoalScorer)?.name ?? '';
@@ -450,11 +479,13 @@ async function main(): Promise<void> {
         lastCountdownNumber = n;
         showBanner(String(n), '', '', '#ffffff', 0);
         bannerEl.classList.add('countdown');
+        countdownSound = 1;
       }
     } else if (lastPhase === 'countdown') {
       lastCountdownNumber = -1;
       showBanner('GO!', '', '', '#7CFC9A', 700);
       bannerEl.classList.add('countdown');
+      countdownSound = 2;
     } else if (game.phase === 'over' && lastPhase !== 'over') {
       const winner: Team | null = game.score.blue === game.score.orange ? null : game.score.blue > game.score.orange ? 'blue' : 'orange';
       const myTeam = localCar.team;
@@ -466,10 +497,13 @@ async function main(): Promise<void> {
     }
     lastPhase = game.phase;
     if (bannerUntil && now > bannerUntil) hideBanner();
-
+  };
+  const frame = (now: number): void => {
+    tick(now);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
+  dbg.__step = tick;
 }
 
 main().catch((err) => {

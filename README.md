@@ -106,16 +106,21 @@ The car follows RocketSim's reverse-engineered vehicle:
 
 ## Visuals and sound
 
-- Walls are opaque and single-sided (normals face inward), so the floor beyond the arena is hidden while a camera outside the wall still sees in.
+Reference footage: a pro's free-play session (Zen, https://www.youtube.com/watch?v=2goJD60z9Zs), sampled frame by frame for the pad pickups, ball streak, boost trails, glass walls and camera framing.
+
+- Boost pads are RL-style pickups: the six big pads float a glowing orb about a metre up on a lit ring, the small pads a bright dot; a pad on cooldown loses its orb and its ring goes dark. All 34 are four instanced meshes plus six glow sprites (ten draw calls).
+- The ball has a hexagon-panel texture, a soft additive glow, a blob shadow on the floor that fades with height, and a white streak (camera-facing ribbon) once it moves faster than about 14 m/s. Cars have a blob shadow and a short team-coloured boost trail behind the flame.
+- Goals burst: a flash, an expanding ring and a spray of points in the scoring team's colour at the ball's last position.
+- Walls are opaque, single-sided (normals face inward) and textured as hexagon-mesh glass over a baked stadium: three seating tiers of soft speckle, walkway rails, roof struts, and the light rail at goal height. A gradient night-sky dome replaces the flat background.
 - The floor is one static 2048 px texture: turf stripes, boundary, goal lines, centre circle, goal boxes and arcs, boost pad rings. Drawn once at startup, zero per-frame cost.
 - The car is a Fennec-style body of a dozen boxes on the Octane hitbox, with four wheels at RL's hardpoints that spin with forward speed and steer with RL's steer-angle curve.
-- All sound is synthesised in WebAudio (no files): engine pitch and brightness follow speed and throttle, a band-passed noise roar while boosting, chimes for pads, thumps for jump and landing, a hollow pock for ball hits scaled by relative speed, a bump for wall hits and a horn for goals. Volume is in Settings → Gameplay.
+- All sound is synthesised in WebAudio (no files). Continuous: engine (pitch and brightness follow speed and throttle), tyre roll on the floor, boost roar with an ignition burst, tyre skid while powersliding or sliding sideways, wind near and at supersonic. One-shots: jump, double-jump and dodge whooshes (band-swept noise), landing thud scaled by impact, big/small pad chimes, ball "pock" with a low thud on hard hits, arena bounce, wall bump, kickoff beeps and "go", goal horn with an explosion. Volume is in Settings → Gameplay.
 
 ## Settings
 
 Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges; defaults are the common pro setup 110 / 270 / 100 / -3 / 0.45) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone, sound volume). Every slider has a description. The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
 
-Ball cam places the camera on the 3D line from the ball through the car. When that would put it underground, the camera sits on the floor a full `distance` from the car instead of collapsing onto it, and the look direction is capped so the car never leaves the bottom of the frame: a high ball rides at the top of the screen with the car below it. Car cam looks level along the car's heading, tilted by the angle setting. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
+Ball cam places the camera on the 3D line from the ball through the car. When that would put it underground, the camera sits on the floor a full `distance` from the car instead of collapsing onto it, and the look direction is capped so the car never leaves the bottom of the frame: a high ball rides at the top of the screen with the car below it, as in RL footage. Car cam follows the car's nose in 3D (pitching up in the air looks up with it) with world up as the roll reference in the air and the surface's up when driving on a wall or ceiling, eased over about a quarter of a second; flip rotation is ignored. Because an air roll is a rotation about the nose axis, it leaves the car-cam view completely still. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
 
 Car-ball contact follows RocketSim's `_OnHit`: restitution 0, the extra impulse computed from pre-collision velocities and positions, applied at most every other tick and only while the ball is still approaching. A 2000 uu/s flat hit on a resting ball leaves at about 3050 uu/s and 16°, peaking around 7 m.
 

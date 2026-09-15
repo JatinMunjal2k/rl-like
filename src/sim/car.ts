@@ -221,6 +221,11 @@ export class Car {
     );
   }
 
+  /** True once the double jump has been used this flight (sound edge). */
+  get doubleJumped(): boolean {
+    return this.hasDoubleJumped;
+  }
+
   /** Remove the body (and collider) from the world. The car is unusable afterwards. */
   destroy(): void {
     this.world.removeRigidBody(this.body);

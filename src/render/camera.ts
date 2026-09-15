@@ -7,14 +7,19 @@ const ballPos = new THREE.Vector3();
 const dir = new THREE.Vector3();
 const desired = new THREE.Vector3();
 const desiredLook = new THREE.Vector3();
-const twist = new THREE.Quaternion();
+const carFwd = new THREE.Vector3();
+const carUp = new THREE.Vector3();
+const tmp = new THREE.Vector3();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 /** Camera never goes below this height, like RL's floor clamp. */
 const MIN_CAMERA_HEIGHT = 0.35;
 
 export interface CameraCarState {
-  /** Heading updates are held while the car is flipping or near inverted (see below). */
+  /** Heading updates are held while the car is flipping (RL's camera ignores dodge rotation). */
   holdHeading: boolean;
+  /** Three or more wheels on a surface: the camera adopts that surface as "down". */
+  grounded: boolean;
 }
 
 /**
@@ -23,17 +28,25 @@ export interface CameraCarState {
  * Ball cam: the camera sits on the 3D line from the ball through the car, `distance` behind the
  * car and `height` above it, then looks at the ball. Because the line is 3D, a high ball pushes
  * the camera down toward the floor (clamped), so the car stays in the lower part of the frame
- * instead of scrolling off the bottom.
+ * instead of scrolling off the bottom. Roll reference is always world up.
  *
- * Car cam: the camera sits behind the car's heading and looks level along it, tilted by `angle`.
- * The heading is the swing-twist yaw of the car's rotation about world up, which stays put
- * through flips about horizontal axes; it is frozen while the car flips or is near inverted.
+ * Car cam: the camera follows the car's nose. Its forward direction eases toward the car's
+ * forward vector in 3D, so pitching the nose up in the air looks up with it, while an air roll
+ * (rotation about that very axis) leaves the view untouched. The roll reference is world up in
+ * the air and the car's own up on a surface, so driving up a wall tilts the world with the car
+ * and leaving it eases back to level. Dodge and flip rotation is ignored: the direction is
+ * frozen while the car flips.
  */
 export class FollowCamera {
   ballCam = true;
   private readonly look = new THREE.Vector3();
   private yaw = 0;
   private initialized = false;
+  private wasBallCam = true;
+  /** Car cam: smoothed forward direction and roll reference. */
+  private readonly fwd = new THREE.Vector3(0, 0, -1);
+  private readonly upRef = new THREE.Vector3(0, 1, 0);
+  private readonly camUp = new THREE.Vector3(0, 1, 0);
 
   constructor(private readonly settings: Settings) {}
 
@@ -54,11 +67,23 @@ export class FollowCamera {
     const height = s.height * UU;
     const posSmooth = 3 + s.stiffness * 27;
     const lookSmooth = posSmooth * 1.4;
-    const yawSmooth = 4 + s.stiffness * 8;
+    const turnSmooth = 5 + s.stiffness * 7;
     const angleRad = (s.angle * Math.PI) / 180;
 
     carPos.copy(car.position);
     ballPos.copy(ball.position);
+    carFwd.set(0, 0, -1).applyQuaternion(car.quaternion);
+    carUp.set(0, 1, 0).applyQuaternion(car.quaternion);
+
+    if (this.ballCam !== this.wasBallCam) {
+      this.wasBallCam = this.ballCam;
+      if (!this.ballCam) {
+        // Entering car cam: start from where the camera is already looking so nothing swings.
+        camera.getWorldDirection(this.fwd);
+        this.upRef.copy(WORLD_UP);
+        this.camUp.copy(WORLD_UP);
+      }
+    }
 
     if (this.ballCam) {
       dir.subVectors(carPos, ballPos);
@@ -97,18 +122,32 @@ export class FollowCamera {
       desiredLook.set(desired.x + toBall.x, desired.y + Math.tan(eLook) * hd, desired.z + toBall.z);
       // Keep the heading in sync so switching to car cam does not swing.
       this.yaw = Math.atan2(-hx, -hz);
+      this.camUp.copy(WORLD_UP);
     } else {
+      const k = this.initialized ? 1 - Math.exp(-turnSmooth * dt) : 1;
+      // Forward: ease toward the nose, frozen during flips.
       if (!state.holdHeading) {
-        const targetYaw = headingYaw(car.quaternion, this.yaw);
-        const k = this.initialized ? 1 - Math.exp(-yawSmooth * dt) : 1;
-        this.yaw += shortestAngle(this.yaw, targetYaw) * k;
+        this.fwd.lerp(carFwd, k);
+        if (!(this.fwd.lengthSq() > 1e-6)) this.fwd.copy(carFwd); // also catches NaN
+        this.fwd.normalize();
       }
-      // Our car faces -Z at yaw 0; rotating about +Y by yaw sends it to (-sin, 0, -cos).
-      const fx = -Math.sin(this.yaw);
-      const fz = -Math.cos(this.yaw);
-      desired.set(carPos.x - fx * distance, carPos.y + height, carPos.z - fz * distance);
-      // Look level along the heading from the camera's own height, so the car sits low in frame.
-      desiredLook.set(desired.x + fx * 20, desired.y, desired.z + fz * 20);
+      // Roll reference: the surface's up while driving on it, world up in the air.
+      const targetUp = state.grounded ? carUp : WORLD_UP;
+      const kUp = this.initialized ? 1 - Math.exp(-(state.grounded ? 4 : 3) * dt) : 1;
+      this.upRef.lerp(targetUp, kUp).normalize();
+      // Camera up must not be parallel to the view direction; near the nose-vertical singularity
+      // keep the previous frame's up instead of letting the view spin.
+      tmp.copy(this.upRef).addScaledVector(this.fwd, -this.fwd.dot(this.upRef));
+      if (tmp.lengthSq() > 0.04) this.camUp.copy(tmp).normalize();
+      else {
+        tmp.copy(this.camUp).addScaledVector(this.fwd, -this.fwd.dot(this.camUp));
+        if (tmp.lengthSq() > 1e-4) this.camUp.copy(tmp).normalize();
+      }
+
+      desired.copy(carPos).addScaledVector(this.fwd, -distance).addScaledVector(this.upRef, height);
+      // Look along the forward direction from the camera's own position, so the car sits low in frame.
+      desiredLook.copy(desired).addScaledVector(this.fwd, 20);
+      this.yaw = Math.atan2(-this.fwd.x, -this.fwd.z);
     }
 
     desired.y = Math.max(desired.y, MIN_CAMERA_HEIGHT);
@@ -116,32 +155,15 @@ export class FollowCamera {
     if (!this.initialized) {
       camera.position.copy(desired);
       this.look.copy(desiredLook);
-      this.yaw = headingYaw(car.quaternion, 0);
+      this.fwd.copy(carFwd);
       this.initialized = true;
     } else {
       camera.position.lerp(desired, 1 - Math.exp(-posSmooth * dt));
       this.look.lerp(desiredLook, 1 - Math.exp(-lookSmooth * dt));
     }
+    camera.up.copy(this.camUp);
     camera.lookAt(this.look);
     // RL's "angle": negative tilts the view down.
     camera.rotateX(angleRad);
   }
-}
-
-/** Yaw of the twist component of q about world +Y. Falls back to `previous` when the nose is vertical. */
-function headingYaw(q: THREE.Quaternion, previous: number): number {
-  const len = Math.hypot(q.y, q.w);
-  if (len < 1e-3) return previous;
-  twist.set(0, q.y / len, 0, q.w / len);
-  let yaw = 2 * Math.atan2(twist.y, twist.w);
-  if (yaw > Math.PI) yaw -= 2 * Math.PI;
-  if (yaw < -Math.PI) yaw += 2 * Math.PI;
-  return yaw;
-}
-
-function shortestAngle(from: number, to: number): number {
-  let d = to - from;
-  while (d > Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return d;
 }

@@ -117,6 +117,8 @@ export class Car {
   /** Player setting: stick magnitude needed for a dodge instead of a double jump (RL default 0.5). */
   dodgeDeadzone = 0.5;
   infiniteBoost: boolean;
+  /** Per-tick diagnostics (vertical components of impulses applied this tick, in m/s of chassis velocity). */
+  readonly debug = { suspensionDvY: 0, frictionDvY: 0, maxCompression: 0, minInvDot: 0 };
 
   private ballCollider: RAPIER.Collider | null = null;
   private readonly wheels: WheelState[] = WHEELS.map(() => ({
@@ -214,6 +216,10 @@ export class Car {
     const realThrottle = willBoost ? 1 : input.throttle;
 
     // --- Wheels -------------------------------------------------------------------
+    this.debug.suspensionDvY = 0;
+    this.debug.frictionDvY = 0;
+    this.debug.maxCompression = 0;
+    this.debug.minInvDot = 0;
     this.probeWheels();
     this.grounded = this.numWheelsInContact >= CAR.wheelsForGround;
     this.probeWorldContact();
@@ -389,11 +395,31 @@ export class Car {
       const damping = relVelBt < 0 ? CAR.suspensionDampingCompression : CAR.suspensionDampingRelaxation;
       let forceBt = (compressionBt * CAR.suspensionStiffness * invDot - damping * relVelBt) * def.forceScale;
       if (forceBt < 0) forceBt = 0;
-      if (forceBt === 0) continue;
+
+      // [RS] "Extra pushback": once a wheel ray is shorter than rest - 2.5 uu the wheel acts as a
+      // rigid contact (Bullet resolveSingleCollision, restitution 0, erp 0.2), split over the
+      // four wheels. This is what stops a hard landing from sinking the hitbox into the floor.
+      let extraPushback = 0;
+      const pushbackThresh = def.restDist - CAR.suspensionSubtraction;
+      if (w.traceLen < pushbackThresh) {
+        rA.subVectors(w.point, pos);
+        vc.copy(angVel).cross(rA).add(vel);
+        const approach = w.normal.dot(vc); // negative when moving into the surface
+        const positionalError = (CAR.contactErp * (pushbackThresh - w.traceLen)) / dt;
+        const velocityError = -approach;
+        tmp.copy(rA).cross(w.normal).applyQuaternion(qInv.copy(q).invert());
+        const denom =
+          1 / CAR.mass + (tmp.x * tmp.x) / INERTIA_LOCAL.x + (tmp.y * tmp.y) / INERTIA_LOCAL.y + (tmp.z * tmp.z) / INERTIA_LOCAL.z;
+        extraPushback = Math.max(0, (positionalError + velocityError) / denom) / WHEELS.length;
+      }
+      if (forceBt === 0 && extraPushback === 0) continue;
 
       // Impulse in BT is force * dt; velocities scale by BT to reach SI.
-      const magnitude = forceBt * dt * BT;
+      const magnitude = forceBt * dt * BT + extraPushback;
       impulse.copy(w.normal).multiplyScalar(magnitude);
+      this.debug.suspensionDvY += impulse.y / CAR.mass;
+      this.debug.maxCompression = Math.max(this.debug.maxCompression, def.restDist - suspLen);
+      this.debug.minInvDot = Math.max(this.debug.minInvDot, invDot);
       this.body.applyImpulseAtPoint({ x: impulse.x, y: impulse.y, z: impulse.z }, { x: w.point.x, y: w.point.y, z: w.point.z }, true);
     }
   }
@@ -512,6 +538,7 @@ export class Car {
     for (let i = 0; i < impulses.length; i++) {
       const J = impulses[i];
       const p = points[i];
+      this.debug.frictionDvY += J.y / CAR.mass;
       this.body.applyImpulseAtPoint({ x: J.x, y: J.y, z: J.z }, { x: p.x, y: p.y, z: p.z }, true);
     }
   }

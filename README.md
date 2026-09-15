@@ -20,7 +20,8 @@ Open the printed URL (default http://127.0.0.1:5173). Press any button on a conn
 | Air pitch | Left stick | W / S |
 | Jump, double jump, dodge | A | Space |
 | Boost | B | Left Shift |
-| Powerslide / free air roll | X | Right Shift |
+| Powerslide | X | Right Shift |
+| Air roll (free): stick X axis rolls | X | Right Shift |
 | Air roll left / right | LB / RB | Q / E |
 | Toggle ball cam | Y | C |
 | Reset match | Back | R |
@@ -77,7 +78,8 @@ Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffnes
 
 - 34 boost pads at RL's positions with RL's pickup volumes (cylinder 208/144 uu radius, 95 uu tall, or box 160/120 uu, 64 uu tall), 100 / 12 boost, 10 s / 4 s cooldown. Free play currently uses infinite boost; pads still light up and recharge.
 - Reset cycles through RL's five blue spawn points in a shuffled order that changes every cycle.
-- On a goal the ball disappears for 2 s and respawns at the centre spot; play is never paused, cars keep driving. The banner shows the goal speed in km/h and uu/s.
+- On a goal the ball disappears for 2 s while play continues; then car and ball reset to kickoff. The banner shows the goal speed in km/h and uu/s.
+- Wheel "extra pushback" (RocketSim): past 2.5 uu of compression a wheel ray acts as a rigid contact, so hard or tilted landings stop on the wheels instead of sinking the hitbox into the floor and being fired back up by the springs.
 - HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red, larger and pulsing at the 2300 uu/s cap; the boost flame goes white when supersonic.
 - The menu shows over black with the game not rendered.
 

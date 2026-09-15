@@ -12,8 +12,10 @@ export interface CarInput {
   roll: number;
   jump: boolean;
   boost: boolean;
-  /** powerslide on the ground, free air roll in the air */
+  /** Powerslide (ground only). */
   handbrake: boolean;
+  /** Free air roll held: the stick's X axis rolls instead of yawing. Already folded into yaw/roll. */
+  airRoll: boolean;
 }
 
 export const EMPTY_INPUT: CarInput = {
@@ -25,6 +27,7 @@ export const EMPTY_INPUT: CarInput = {
   jump: false,
   boost: false,
   handbrake: false,
+  airRoll: false,
 };
 
 /** What the input layer hands the frame loop: car controls plus one-shot UI actions. */

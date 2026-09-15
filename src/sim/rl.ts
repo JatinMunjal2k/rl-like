@@ -127,6 +127,8 @@ export const CAR = {
   maxSuspensionTravel: 12 * UU,
   /** Subtracted from the wheel ray length. Given in BT units in RocketSim (0.05 BT = 2.5 uu). */
   suspensionSubtraction: 0.05 * BT,
+  /** Bullet's default solverInfo.m_erp, used by the wheel "extra pushback" contact (resolveSingleCollision). */
+  contactErp: 0.2,
   /** [RS] isOnGround when at least this many wheels touch something (the ball counts). */
   wheelsForGround: 3,
 

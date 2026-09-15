@@ -11,6 +11,7 @@ export const ACTIONS = [
   'jump',
   'boost',
   'handbrake',
+  'airRoll',
   'airRollLeft',
   'airRollRight',
   'ballCam',
@@ -24,7 +25,8 @@ export const ACTION_LABELS: Record<Action, string> = {
   reverse: 'Reverse',
   jump: 'Jump / dodge',
   boost: 'Boost',
-  handbrake: 'Powerslide / air roll',
+  handbrake: 'Powerslide',
+  airRoll: 'Air roll (free)',
   airRollLeft: 'Air roll left',
   airRollRight: 'Air roll right',
   ballCam: 'Toggle ball cam',
@@ -46,6 +48,7 @@ export const DEFAULT_BINDINGS: Bindings = {
     jump: 0, // A
     boost: 1, // B
     handbrake: 2, // X
+    airRoll: 2, // X (RL also defaults both to the same button)
     airRollLeft: 4, // LB
     airRollRight: 5, // RB
     ballCam: 3, // Y
@@ -58,6 +61,7 @@ export const DEFAULT_BINDINGS: Bindings = {
     jump: 'Space',
     boost: 'ShiftLeft',
     handbrake: 'ShiftRight',
+    airRoll: 'ShiftRight',
     airRollLeft: 'KeyQ',
     airRollRight: 'KeyE',
     ballCam: 'KeyC',
@@ -300,16 +304,18 @@ export class InputManager {
     const lxAir = this.stick(gp.axes[0] ?? 0, c.aerialSensitivity);
     const lyAir = this.stick(gp.axes[1] ?? 0, c.aerialSensitivity);
     const handbrake = pressed(gp, g.handbrake);
+    const airRoll = pressed(gp, g.airRoll);
     const rollButtons = (pressed(gp, g.airRollRight) ? 1 : 0) - (pressed(gp, g.airRollLeft) ? 1 : 0);
     return {
       throttle: clamp(value(gp, g.throttle) - value(gp, g.reverse)),
       steer: lxSteer,
       pitch: lyAir, // stick back (positive) = nose up
-      yaw: handbrake ? 0 : lxAir,
-      roll: handbrake ? lxAir : rollButtons,
+      yaw: airRoll ? 0 : lxAir,
+      roll: airRoll ? lxAir : rollButtons,
       jump: pressed(gp, g.jump),
       boost: pressed(gp, g.boost),
       handbrake,
+      airRoll,
     };
   }
 
@@ -319,26 +325,28 @@ export class InputManager {
     const fwd = (k.has(b.throttle) || k.has('ArrowUp') ? 1 : 0) - (k.has(b.reverse) || k.has('ArrowDown') ? 1 : 0);
     const side = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const handbrake = k.has(b.handbrake);
+    const airRoll = k.has(b.airRoll);
     const roll = (k.has(b.airRollRight) ? 1 : 0) - (k.has(b.airRollLeft) ? 1 : 0);
     return {
       throttle: fwd,
       steer: side,
       pitch: -fwd, // forward key pitches the nose down like pushing the stick forward
-      yaw: handbrake ? 0 : side,
-      roll: handbrake ? side : roll,
+      yaw: airRoll ? 0 : side,
+      roll: airRoll ? side : roll,
       jump: k.has(b.jump),
       boost: k.has(b.boost),
       handbrake,
+      airRoll,
     };
   }
 }
 
 function zeroed(): CarInput {
-  return { throttle: 0, steer: 0, pitch: 0, yaw: 0, roll: 0, jump: false, boost: false, handbrake: false };
+  return { throttle: 0, steer: 0, pitch: 0, yaw: 0, roll: 0, jump: false, boost: false, handbrake: false, airRoll: false };
 }
 
 function isActive(i: CarInput): boolean {
-  return i.throttle !== 0 || i.steer !== 0 || i.pitch !== 0 || i.roll !== 0 || i.jump || i.boost || i.handbrake;
+  return i.throttle !== 0 || i.steer !== 0 || i.pitch !== 0 || i.roll !== 0 || i.jump || i.boost || i.handbrake || i.airRoll;
 }
 
 function clamp(v: number): number {

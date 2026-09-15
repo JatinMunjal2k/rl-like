@@ -117,8 +117,8 @@ export class Game {
     if (this.goalPause > 0) {
       this.goalPause -= dt;
       if (this.goalPause <= 0) {
-        this.goalPause = 0;
-        this.respawnBall();
+        // Play continues during the pause; then everything goes back to kickoff.
+        this.resetKickoff();
       }
     }
 

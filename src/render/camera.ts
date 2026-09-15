@@ -86,7 +86,8 @@ export class FollowCamera {
       }
       // Look at the ball, but never let the car leave the bottom of the frame: cap the look
       // elevation so the car stays inside the vertical field of view (with the angle tilt).
-      const vHalf = ((camera.fov / 2) * Math.PI) / 180 - 0.06;
+      // Margin keeps the car about a fifth of the frame above the bottom edge, as RL frames it.
+      const vHalf = ((camera.fov / 2) * Math.PI) / 180 - 0.16;
       const toBall = desiredLook.copy(ballPos).sub(desired);
       const toCar = dir.copy(carPos).sub(desired); // reuse scratch
       const eBall = Math.atan2(toBall.y, Math.hypot(toBall.x, toBall.z));

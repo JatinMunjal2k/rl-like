@@ -213,17 +213,17 @@ export class Game {
   /**
    * [RS] BoostPad: a pad is collected when the car origin is inside its cylinder
    * (radius 208/144, height 95) or its box (half-width 160/120, height 64), then it cools down
-   * for 10 s (big) or 4 s (small). Collected even at full boost.
+   * for 10 s (big) or 4 s (small). A car with full boost does not collect pads.
    */
   private updatePads(dt: number): void {
-    const c = this.curr.car;
     const t = this.car.body.translation();
-    void c;
+    const canCollect = this.car.boost < CAR.boostMax;
     for (const p of this.pads) {
       if (p.cooldown > 0) {
         p.cooldown = Math.max(0, p.cooldown - dt);
         continue;
       }
+      if (!canCollect) continue;
       const dx = t.x - p.x;
       const dz = t.z - p.z;
       const dy = t.y - p.y;

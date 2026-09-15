@@ -84,6 +84,8 @@ async function main(): Promise<void> {
   let lastSpeedUU = -1;
   let lastBoost = -1;
   let lastBoostState = '';
+  let ballCamBeforeGoal = followCam.ballCam;
+  let wasInGoalPause = false;
 
   const frame = (now: number): void => {
     const frameDt = Math.min((now - last) / 1000, 0.1);
@@ -110,7 +112,20 @@ async function main(): Promise<void> {
     if (fi.toggleCameraPressed) {
       followCam.toggle();
       setCamMode(followCam.ballCam);
+      if (game.goalPause > 0) ballCamBeforeGoal = followCam.ballCam; // user's choice during the pause sticks
     }
+
+    // Goal: no ball to look at, so car cam until kickoff, then back to what the player had.
+    const inGoalPause = game.goalPause > 0;
+    if (inGoalPause && !wasInGoalPause) {
+      ballCamBeforeGoal = followCam.ballCam;
+      followCam.ballCam = false;
+      setCamMode(false);
+    } else if (!inGoalPause && wasInGoalPause) {
+      followCam.ballCam = ballCamBeforeGoal;
+      setCamMode(followCam.ballCam);
+    }
+    wasInGoalPause = inGoalPause;
 
     // Fixed-step simulation; render interpolates between the last two ticks.
     let steps = 0;

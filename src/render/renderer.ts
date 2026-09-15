@@ -468,7 +468,7 @@ export class Renderer {
   }
 
   private buildBall(): THREE.Mesh {
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(BALL.radius, 24, 16), new THREE.MeshLambertMaterial({ map: makeBallTexture() }));
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(BALL.visualRadius, 24, 16), new THREE.MeshLambertMaterial({ map: makeBallTexture() }));
     this.scene.add(mesh);
     return mesh;
   }

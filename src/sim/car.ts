@@ -85,7 +85,7 @@ const WHEELS: WheelDef[] = [
   const off = front ? OCTANE.frontWheelOffset : OCTANE.rearWheelOffset;
   return {
     hardpoint: new Vector3(side * off.y, off.z, -off.x),
-    restDist: front ? OCTANE.frontSuspensionRest : OCTANE.rearSuspensionRest,
+    restDist: (front ? OCTANE.frontSuspensionRest : OCTANE.rearSuspensionRest) - TUNING.suspensionRestOffset + (front ? OCTANE.frontWheelRadius : OCTANE.rearWheelRadius), // see tuning.ts
     radius: front ? OCTANE.frontWheelRadius : OCTANE.rearWheelRadius,
     forceScale: front ? CAR.suspensionForceScaleFront : CAR.suspensionForceScaleBack,
     front,
@@ -100,6 +100,8 @@ interface WheelState {
 }
 
 const UU_TO_BT = UU * M_TO_BT;
+/** Guards duration comparisons against float64 tick accumulation (see updateJump). */
+const TIME_EPS = 1e-6;
 
 // Scratch objects.
 const q = new Quaternion();
@@ -756,7 +758,7 @@ export class Car {
     localAng.copy(angVel).applyQuaternion(qInv);
 
     let doAirControl = false;
-    if (this.isFlipping) this.isFlipping = this.hasFlipped && this.flipTime < CAR.flipTorqueTime;
+    if (this.isFlipping) this.isFlipping = this.hasFlipped && this.flipTime + TIME_EPS < CAR.flipTorqueTime;
 
     if (this.isFlipping) {
       if (this.flipDirForward !== 0 || this.flipDirSide !== 0) {
@@ -816,7 +818,9 @@ export class Car {
     }
 
     if (this.isJumping) {
-      this.isJumping = this.jumpTime < CAR.jumpMinTime || (input.jump && this.jumpTime < CAR.jumpMaxTime);
+      // TIME_EPS: 24 ticks of 1/120 s sum to 0.19999999… in float64, which would grant a 25th
+      // tick of jump acceleration that RocketSim (float32) does not; measured +12 uu/s.
+      this.isJumping = this.jumpTime + TIME_EPS < CAR.jumpMinTime || (input.jump && this.jumpTime + TIME_EPS < CAR.jumpMaxTime);
     } else if (this.grounded && jumpPressed) {
       this.isJumping = true;
       this.jumpTime = 0;
@@ -825,7 +829,7 @@ export class Car {
 
     if (this.isJumping) {
       this.hasJumped = true;
-      const scale = this.jumpTime < CAR.jumpMinTime ? CAR.jumpPreMinAccelScale : 1;
+      const scale = this.jumpTime + TIME_EPS < CAR.jumpMinTime ? CAR.jumpPreMinAccelScale : 1;
       vel.addScaledVector(up, CAR.jumpAccel * scale * dt);
     }
 

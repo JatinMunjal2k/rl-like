@@ -73,7 +73,8 @@ export const GOAL_PROFILE = {
 // Ball
 // ---------------------------------------------------------------------------------
 export const BALL = {
-  radius: 92.75 * UU, // [WIKI] (RocketSim uses 91.25 collision radius + Bullet margin, resting at z = 93.15)
+  radius: 91.25 * UU, // [RS] BALL_COLLISION_RADIUS_SOCCAR, confirmed on car-soccer.com's RocketSim build
+  visualRadius: 92.75 * UU, // [WIKI] the rendered ball
   restZ: 93.15 * UU, // [RS] BALL_REST_Z
   mass: 30, // [RS] BALL_MASS_BT = CAR_MASS_BT / 6
   restitution: 0.6, // [RS] BALL_RESTITUTION

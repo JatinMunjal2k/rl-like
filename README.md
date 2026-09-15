@@ -120,9 +120,37 @@ Reference footage: a pro's free-play session (Zen, https://www.youtube.com/watch
 
 Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges; defaults are the common pro setup 110 / 270 / 100 / -3 / 0.45) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone, sound volume). Every slider has a description. The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
 
-Ball cam places the camera on the 3D line from the ball through the car. When that would put it underground, the camera sits on the floor a full `distance` from the car instead of collapsing onto it, and the look direction is capped so the car never leaves the bottom of the frame: a high ball rides at the top of the screen with the car below it, as in RL footage. Car cam follows the car's nose in 3D (pitching up in the air looks up with it) with world up as the roll reference in the air and the surface's up when driving on a wall or ceiling, eased over about a quarter of a second; flip rotation is ignored. Because an air roll is a rotation about the nose axis, it leaves the car-cam view completely still. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
+The camera is a measured copy of car-soccer.com's camera kernel, which implements Rocket League's rules. That kernel is compiled WebAssembly, so it was probed as a black box: the same car and ball placements were fed to it and to `FollowCamera`, and every probe (dozens, covering kickoff, high balls at several heights and distances, each camera setting varied in isolation, speed, supersonic, walls, slopes, the ceiling and the car pitched or rolled in the air) matches to within 0.1° of pitch and a few uu of position. The rules it encodes:
+
+- A pivot sits `height` above the car. The camera is pulled `distance` back along the smoothed view direction, so the −3° `angle` also raises it by 14 uu. The arm grows with speed by (1 − stiffness) × speed / 20 uu, which is all stiffness does. The camera never drops below 10 uu. FOV is horizontal and widens by 10° while supersonic.
+- Ball cam: yaw points at the ball; the pivot rises 0.9 uu per degree of the ball's elevation; pitch blends from `angle` toward the ball's elevation with a weight that ramps from 0 at 22° to 0.8 at 44° and never exceeds 0.8. A ball straight overhead is followed only 80% of the way, so the car leaves the frame, as in RL. First-order lag of 8.6/s.
+- Car cam: yaw follows the nose heading, held through flips (a heading jump past 90° is ignored) and near-vertical noses. In the air the pitch is just `angle` and the roll is level, so air rolls and flips leave the view alone. On a surface the pivot rides the car's up, the pitch follows about 75% of the nose pitch and the roll a tenth of the car's roll. First-order lag of 24.7/s.
+
+Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
 
 Car-ball contact follows RocketSim's `_OnHit`: restitution 0, the extra impulse computed from pre-collision velocities and positions, applied at most every other tick and only while the ball is still approaching. A 2000 uu/s flat hit on a resting ball leaves at about 3050 uu/s and 16°, peaking around 7 m.
+
+## Physics audit against RocketSim
+
+car-soccer.com ships RocketSim compiled to WebAssembly. Driving that build headlessly with the same inputs as our `Game` gives a direct comparison (all values uu, uu/s, rad/s at 120 Hz):
+
+| Test | RocketSim | RL-like |
+| --- | --- | --- |
+| Rest pose (origin z, pitch) | 17.03, −0.55° | 17.02, −0.55° |
+| Held jump height / tap jump / double jump | 214.8 / 72.1 / 444.6 | 214.8 / 72.1 / 444.4 |
+| Held jump z every 1/12 s | 26.1 57.5 92.4 123.4 149.9 171.8 189.2 202.2 210.6 214.5 | identical to 0.1 |
+| Forward dodge speed gain | 500 | 500 |
+| 0 → 2200 with boost, 0 → 2290 | 1.583 s, 1.675 s | 1.583 s, 1.675 s |
+| Throttle-only top speed | 1410.1 | 1410.2 |
+| Throttle acceleration, brake, coast traces | | match within 1% |
+| Steady full-throttle turn: speed, yaw rate, radius | 1227, 2.348, 523 | 1228, 2.348, 523 |
+| Turn curve from rest (12 samples) | | within 0.5% |
+| Powerslide yaw rate build-up (0.125 s steps) | 2.25 2.82 3.07 3.25 3.33 3.56 | 2.31 2.83 3.08 3.25 3.33 3.65 |
+| Side flip: z and up.z every 0.1 s, landing tick | landed 137 | landed 138, values within 2 uu / 0.03 |
+| Ball bounce apex ratio | 0.44 | 0.44 |
+| Boosted kickoff hit: ball speed, elevation, apex | 3014, 18.4°, 797 | 3039, 17.0°, 705 |
+
+Three of these were fixes found by the comparison: a 25th tick of jump acceleration from float64 tick accumulation, the ball's collision radius (91.25, not 92.75), and the suspension rest lengths (RocketSim's car sits 1.9 uu higher and 0.55° nose down than the raw config values give, which was also the whole source of a 10% turn-radius error). Remaining known gaps: the kickoff hit leaves about 1.5° lower (Rapier's box-sphere contact normal vs Bullet's margin-rounded box), and RocketSim applies steering and braking to the wheels one tick later than we do.
 
 ## Match flow and HUD
 

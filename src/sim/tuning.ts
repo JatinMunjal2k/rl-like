@@ -32,6 +32,17 @@ export const TUNING = {
    *    hitbox collision handles deep penetration instead.
    */
 
+  /**
+   * Zero-force suspension length from the hardpoint to the ground, per axle. Measured on
+   * car-soccer.com's RocketSim build: the Octane settles at origin z = 17.03, pitched 0.55° nose
+   * down, with suspension lengths (trace minus wheel radius) of 24.79 front and 23.11 rear. Their
+   * difference equals the config rest lengths' difference (38.755 - 37.055 = 1.70), so RocketSim
+   * uses the config values minus a common offset; with our identical spring law and 0.5 g sticky
+   * force that offset comes out at 12.115 uu, i.e. the unloaded trace is config - 12.115 + radius.
+   * Using the raw config values as trace lengths left our car 1.9 uu low and level.
+   */
+  suspensionRestOffset: 12.115 * UU,
+
   // ------------------------------------------------------------------------------
   // Recovery
   // ------------------------------------------------------------------------------

@@ -344,7 +344,8 @@ async function main(): Promise<void> {
     renderer.syncPads(game.pads, frameDt);
     const carObj = renderer.carObject(s.localId);
     if (carObj) {
-      followCam.update(renderer.camera, carObj, renderer.ballMesh, { holdHeading: localCar.isFlipping, grounded: localCar.grounded }, frameDt);
+      const lvCam = localCar.body.linvel();
+      followCam.update(renderer.camera, carObj, renderer.ballMesh, { grounded: localCar.grounded, speed: Math.hypot(lvCam.x, lvCam.y, lvCam.z), supersonic: localCar.supersonic }, frameDt);
       renderer.render(frameDt);
     }
 

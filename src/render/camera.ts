@@ -4,49 +4,76 @@ import type { Settings } from '../settings';
 
 const carPos = new THREE.Vector3();
 const ballPos = new THREE.Vector3();
-const dir = new THREE.Vector3();
-const desired = new THREE.Vector3();
-const desiredLook = new THREE.Vector3();
 const carFwd = new THREE.Vector3();
 const carUp = new THREE.Vector3();
+const pivot = new THREE.Vector3();
+const dir = new THREE.Vector3();
 const tmp = new THREE.Vector3();
+const desired = new THREE.Vector3();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const DEG = Math.PI / 180;
 
-/** Camera never goes below this height, like RL's floor clamp. */
-const MIN_CAMERA_HEIGHT = 0.35;
+/** Camera never goes below this height: RL's floor clamp (10 uu). */
+const MIN_CAMERA_HEIGHT = 10 * UU;
+/** First-order lag rates of the view direction, measured from car-soccer.com's camera kernel. */
+const BALL_CAM_RATE = 8.6;
+const CAR_CAM_RATE = 24.7;
+/** Ball cam: the pivot rises 0.9 uu per degree of the ball's elevation. */
+const PIVOT_RISE_PER_DEG = 0.9 * UU;
+/** Ball cam: pitch blends from `angle` to the ball's elevation, ramping 0 → 0.8 between 22° and 44° of elevation. */
+const BLEND_START = 22 * DEG;
+const BLEND_END = 44 * DEG;
+const BLEND_MAX = 0.8;
+/** Stiffness: the arm grows by (1 - stiffness) * speed / 20 (uu per uu/s). */
+const SPEED_TRAIL = 1 / 20;
+/** Supersonic widens the horizontal FOV by this much. */
+const SUPERSONIC_FOV_BOOST = 10;
+/** Car cam on a surface follows the nose pitch by this fraction (slightly less at steep angles). */
+const NOSE_FOLLOW = (noseRad: number) => 0.785 - 0.001 * Math.abs(noseRad) / DEG;
+/** Car cam on a surface rolls with a tenth of the car's bank. */
+const BANK_FOLLOW = 0.1;
 
 export interface CameraCarState {
-  /** Heading updates are held while the car is flipping (RL's camera ignores dodge rotation). */
-  holdHeading: boolean;
-  /** Three or more wheels on a surface: the camera adopts that surface as "down". */
+  /** Three or more wheels on a surface. */
   grounded: boolean;
+  /** Car speed in m/s. */
+  speed: number;
+  supersonic: boolean;
 }
 
 /**
- * Rocket League chase camera, driven by RL's camera settings (FOV, distance, height, angle, stiffness).
+ * Rocket League chase camera, reproduced from measurements of car-soccer.com's camera kernel
+ * (which runs RL's own camera rules). Everything below was fitted to that kernel's outputs
+ * over dozens of probed scenes and matches it to within a degree and a few uu.
  *
- * Ball cam: the camera sits on the 3D line from the ball through the car, `distance` behind the
- * car and `height` above it, then looks at the ball. Because the line is 3D, a high ball pushes
- * the camera down toward the floor (clamped), so the car stays in the lower part of the frame
- * instead of scrolling off the bottom. Roll reference is always world up.
+ * Common: a pivot sits `height` above the car. The camera is pulled `distance` back from the
+ * pivot along the smoothed view direction (so the `angle` tilt also raises the camera), the arm
+ * grows with speed by (1 - stiffness) * speed / 20, and the camera never goes below 10 uu.
+ * The view direction eases toward its target with a first-order lag. FOV is horizontal and
+ * widens by 10° while supersonic.
  *
- * Car cam: the camera follows the car's nose. Its forward direction eases toward the car's
- * forward vector in 3D, so pitching the nose up in the air looks up with it, while an air roll
- * (rotation about that very axis) leaves the view untouched. The roll reference is world up in
- * the air and the car's own up on a surface, so driving up a wall tilts the world with the car
- * and leaving it eases back to level. Dodge and flip rotation is ignored: the direction is
- * frozen while the car flips.
+ * Ball cam: the pivot uses world up and rises by 0.9 uu per degree of the ball's elevation.
+ * Yaw points at the ball. Pitch is a blend of `angle` and the ball's elevation E from the pivot:
+ * weight 0 below 22°, ramping to 0.8 at 44° and staying there. So a very high ball is followed
+ * only 80% of the way and the car can leave the frame, exactly as in RL.
+ *
+ * Car cam: yaw follows the nose heading, holding through flips (a heading jump past 90° is
+ * ignored) and near-vertical noses. In the air the pitch is just `angle` and the roll is level,
+ * so air rolls and flips leave the view alone. On a surface the pivot rides the car's up, the
+ * pitch follows about three quarters of the nose pitch and the roll a tenth of the bank.
  */
 export class FollowCamera {
   ballCam = true;
-  private readonly look = new THREE.Vector3();
-  private yaw = 0;
   private initialized = false;
   private wasBallCam = true;
-  /** Car cam: smoothed forward direction and roll reference. */
-  private readonly fwd = new THREE.Vector3(0, 0, -1);
+  /** Smoothed view direction. */
+  private readonly viewDir = new THREE.Vector3(0, 0, -1);
+  /** Smoothed heading (rad, our convention: 0 faces -Z) for the car cam. */
+  private yaw = 0;
+  /** Smoothed pivot up reference (world up in the air / ball cam, the car's up on a surface). */
   private readonly upRef = new THREE.Vector3(0, 1, 0);
   private readonly camUp = new THREE.Vector3(0, 1, 0);
+  private fovBoost = 0;
 
   constructor(private readonly settings: Settings) {}
 
@@ -54,10 +81,10 @@ export class FollowCamera {
     this.ballCam = !this.ballCam;
   }
 
+  /** RL's FOV setting is horizontal; three.js wants vertical. Supersonic adds 10°. */
   applyProjection(camera: THREE.PerspectiveCamera): void {
-    // RL's FOV setting is horizontal; three.js wants vertical.
-    const hfov = (this.settings.camera.fov * Math.PI) / 180;
-    camera.fov = (2 * Math.atan(Math.tan(hfov / 2) / camera.aspect) * 180) / Math.PI;
+    const hfov = (this.settings.camera.fov + this.fovBoost) * DEG;
+    camera.fov = (2 * Math.atan(Math.tan(hfov / 2) / camera.aspect)) / DEG;
     camera.updateProjectionMatrix();
   }
 
@@ -65,10 +92,9 @@ export class FollowCamera {
     const s = this.settings.camera;
     const distance = s.distance * UU;
     const height = s.height * UU;
-    const posSmooth = 3 + s.stiffness * 27;
-    const lookSmooth = posSmooth * 1.4;
-    const turnSmooth = 5 + s.stiffness * 7;
-    const angleRad = (s.angle * Math.PI) / 180;
+    const angleRad = s.angle * DEG;
+    // Speed trail: (1 - stiffness) * speed / 20 in uu of arm per uu/s of speed.
+    const arm = distance + (1 - s.stiffness) * (state.speed / UU) * SPEED_TRAIL * UU;
 
     carPos.copy(car.position);
     ballPos.copy(ball.position);
@@ -77,93 +103,103 @@ export class FollowCamera {
 
     if (this.ballCam !== this.wasBallCam) {
       this.wasBallCam = this.ballCam;
-      if (!this.ballCam) {
-        // Entering car cam: start from where the camera is already looking so nothing swings.
-        camera.getWorldDirection(this.fwd);
+      // The smoothed direction carries over, so the switch swings rather than cuts.
+      this.yaw = Math.atan2(-this.viewDir.x, -this.viewDir.z);
+    }
+
+    let targetYaw: number;
+    let targetPitch: number;
+    let rate: number;
+
+    if (this.ballCam) {
+      // Pivot: world up, raised by 0.9 uu per degree of the ball's elevation from the base pivot.
+      const dx = ballPos.x - carPos.x;
+      const dz = ballPos.z - carPos.z;
+      const h = Math.max(1e-3, Math.hypot(dx, dz));
+      const e0 = Math.atan2(ballPos.y - (carPos.y + height), h);
+      const rise = (Math.abs(e0) / DEG) * PIVOT_RISE_PER_DEG;
+      pivot.set(carPos.x, carPos.y + height + rise, carPos.z);
+      const e = Math.atan2(ballPos.y - pivot.y, h);
+      const t = BLEND_MAX * clamp01((Math.abs(e) - BLEND_START) / (BLEND_END - BLEND_START));
+      targetPitch = angleRad * (1 - t) + e * t;
+      targetYaw = h > 0.5 ? Math.atan2(-dx, -dz) : this.yaw; // our yaw: 0 faces -Z, positive turns toward -X
+      rate = BALL_CAM_RATE;
+      this.upRef.copy(WORLD_UP);
+      this.camUp.copy(WORLD_UP);
+    } else {
+      // Heading from the nose. Hold it when the nose is near vertical or when it jumps by more
+      // than 90° (the car is flipping over), which is how RL keeps flips from spinning the view.
+      const fh = Math.hypot(carFwd.x, carFwd.z);
+      if (fh > 0.25) {
+        const y = Math.atan2(-carFwd.x, -carFwd.z);
+        if (Math.abs(shortestAngle(this.yaw, y)) < 0.5 * Math.PI || !this.initialized) targetYaw = y;
+        else targetYaw = this.yaw;
+      } else targetYaw = this.yaw;
+      if (state.grounded) {
+        // On a surface: pivot along the car's up, pitch follows ~75% of the nose pitch, roll a tenth of the bank.
+        const nose = Math.atan2(carFwd.y, fh);
+        targetPitch = angleRad + nose * NOSE_FOLLOW(nose);
+        this.upRef.copy(carUp);
+        // Camera up: a tenth of the car's roll about its nose (RL's roll = atan2(-right.z, up.z)),
+        // applied about the view heading. A pitched slope has no roll and gets no tilt.
+        tmp.set(1, 0, 0).applyQuaternion(car.quaternion); // car right
+        const bank = Math.atan2(-tmp.y, carUp.y);
+        const axis = new THREE.Vector3(-Math.sin(targetYaw), 0, -Math.cos(targetYaw)); // heading, horizontal
+        this.camUp.copy(WORLD_UP).applyAxisAngle(axis, bank * BANK_FOLLOW);
+      } else {
+        targetPitch = angleRad;
         this.upRef.copy(WORLD_UP);
         this.camUp.copy(WORLD_UP);
       }
+      pivot.copy(carPos).addScaledVector(this.upRef, height);
+      rate = CAR_CAM_RATE;
     }
 
-    if (this.ballCam) {
-      dir.subVectors(carPos, ballPos);
-      if (dir.lengthSq() < 0.25) dir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-      dir.normalize();
-      // Horizontal direction from ball to car, used when the 3D line would put the camera underground.
-      let hx = dir.x;
-      let hz = dir.z;
-      const hl = Math.hypot(hx, hz);
-      if (hl > 1e-4) {
-        hx /= hl;
-        hz /= hl;
-      } else {
-        hx = Math.sin(this.yaw);
-        hz = Math.cos(this.yaw);
-      }
-      desired.copy(carPos).addScaledVector(dir, distance);
-      desired.y += height;
-      if (desired.y < MIN_CAMERA_HEIGHT) {
-        // Stay a full `distance` from the car while sitting on the floor: slide the camera out
-        // horizontally instead of collapsing onto the car. Keeps the car in the lower frame.
-        const dy = carPos.y - MIN_CAMERA_HEIGHT;
-        const h = Math.sqrt(Math.max(distance * distance - dy * dy, (0.6 * distance) ** 2));
-        desired.set(carPos.x + hx * h, MIN_CAMERA_HEIGHT, carPos.z + hz * h);
-      }
-      // Look at the ball, but never let the car leave the bottom of the frame: cap the look
-      // elevation so the car stays inside the vertical field of view (with the angle tilt).
-      // Margin keeps the car about a fifth of the frame above the bottom edge, as RL frames it.
-      const vHalf = ((camera.fov / 2) * Math.PI) / 180 - 0.16;
-      const toBall = desiredLook.copy(ballPos).sub(desired);
-      const toCar = dir.copy(carPos).sub(desired); // reuse scratch
-      const eBall = Math.atan2(toBall.y, Math.hypot(toBall.x, toBall.z));
-      const eCar = Math.atan2(toCar.y, Math.hypot(toCar.x, toCar.z));
-      const eLook = Math.min(eBall, eCar + vHalf - angleRad);
-      const hd = Math.hypot(toBall.x, toBall.z);
-      desiredLook.set(desired.x + toBall.x, desired.y + Math.tan(eLook) * hd, desired.z + toBall.z);
-      // Keep the heading in sync so switching to car cam does not swing.
-      this.yaw = Math.atan2(-hx, -hz);
-      this.camUp.copy(WORLD_UP);
-    } else {
-      const k = this.initialized ? 1 - Math.exp(-turnSmooth * dt) : 1;
-      // Forward: ease toward the nose, frozen during flips.
-      if (!state.holdHeading) {
-        this.fwd.lerp(carFwd, k);
-        if (!(this.fwd.lengthSq() > 1e-6)) this.fwd.copy(carFwd); // also catches NaN
-        this.fwd.normalize();
-      }
-      // Roll reference: the surface's up while driving on it, world up in the air.
-      const targetUp = state.grounded ? carUp : WORLD_UP;
-      const kUp = this.initialized ? 1 - Math.exp(-(state.grounded ? 4 : 3) * dt) : 1;
-      this.upRef.lerp(targetUp, kUp).normalize();
-      // Camera up must not be parallel to the view direction; near the nose-vertical singularity
-      // keep the previous frame's up instead of letting the view spin.
-      tmp.copy(this.upRef).addScaledVector(this.fwd, -this.fwd.dot(this.upRef));
-      if (tmp.lengthSq() > 0.04) this.camUp.copy(tmp).normalize();
-      else {
-        tmp.copy(this.camUp).addScaledVector(this.fwd, -this.fwd.dot(this.camUp));
-        if (tmp.lengthSq() > 1e-4) this.camUp.copy(tmp).normalize();
-      }
-
-      desired.copy(carPos).addScaledVector(this.fwd, -distance).addScaledVector(this.upRef, height);
-      // Look along the forward direction from the camera's own position, so the car sits low in frame.
-      desiredLook.copy(desired).addScaledVector(this.fwd, 20);
-      this.yaw = Math.atan2(-this.fwd.x, -this.fwd.z);
-    }
-
-    desired.y = Math.max(desired.y, MIN_CAMERA_HEIGHT);
-
+    // Ease the view direction (as yaw/pitch) toward the target with a first-order lag.
     if (!this.initialized) {
-      camera.position.copy(desired);
-      this.look.copy(desiredLook);
-      this.fwd.copy(carFwd);
+      this.yaw = targetYaw;
+      setDir(this.viewDir, targetYaw, targetPitch);
       this.initialized = true;
     } else {
-      camera.position.lerp(desired, 1 - Math.exp(-posSmooth * dt));
-      this.look.lerp(desiredLook, 1 - Math.exp(-lookSmooth * dt));
+      const k = 1 - Math.exp(-rate * dt);
+      const currentPitch = Math.asin(Math.max(-1, Math.min(1, this.viewDir.y)));
+      this.yaw += shortestAngle(this.yaw, targetYaw) * k;
+      const pitch = currentPitch + (targetPitch - currentPitch) * k;
+      setDir(this.viewDir, this.yaw, pitch);
     }
+    if (this.ballCam) this.yaw = Math.atan2(-this.viewDir.x, -this.viewDir.z);
+
+    // Camera rigidly on the arm behind the pivot, floor clamped; look along the view direction.
+    desired.copy(pivot).addScaledVector(this.viewDir, -arm);
+    if (desired.y < MIN_CAMERA_HEIGHT) desired.y = MIN_CAMERA_HEIGHT;
+    camera.position.copy(desired);
+    dir.copy(this.viewDir);
     camera.up.copy(this.camUp);
-    camera.lookAt(this.look);
-    // RL's "angle": negative tilts the view down.
-    camera.rotateX(angleRad);
+    camera.lookAt(tmp.copy(camera.position).add(dir));
+
+    // Supersonic FOV boost, eased.
+    const targetBoost = state.supersonic ? SUPERSONIC_FOV_BOOST : 0;
+    const nb = this.fovBoost + (targetBoost - this.fovBoost) * (1 - Math.exp(-6 * dt));
+    if (Math.abs(nb - this.fovBoost) > 1e-3) {
+      this.fovBoost = nb;
+      this.applyProjection(camera);
+    }
   }
+}
+
+/** Direction from yaw (0 faces -Z, positive toward -X) and pitch (positive up). */
+function setDir(out: THREE.Vector3, yaw: number, pitch: number): void {
+  const c = Math.cos(pitch);
+  out.set(-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c);
+}
+
+function shortestAngle(from: number, to: number): number {
+  let d = to - from;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }

@@ -1,9 +1,10 @@
 import { Game } from './sim/game';
-import { CAR, TICK_DT, UU } from './sim/rl';
+import { CAR, TICK_DT, UU, curve } from './sim/rl';
 import { Renderer } from './render/renderer';
 import { FollowCamera } from './render/camera';
 import { InputManager } from './input/input';
 import { Menu } from './ui/menu';
+import { SoundManager } from './audio/sound';
 import { loadSettings, saveSettings } from './settings';
 
 const app = document.getElementById('app')!;
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
   const followCam = new FollowCamera(settings);
   const input = new InputManager(settings);
   const menu = new Menu(document.body, input, settings);
+  const sound = new SoundManager();
 
   // Debug handle for the browser console.
   (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__game = game;
@@ -57,6 +59,7 @@ async function main(): Promise<void> {
     saveSettings(settings);
     followCam.applyProjection(renderer.camera);
     game.car.dodgeDeadzone = settings.controls.dodgeDeadzone;
+    sound.setVolume(settings.audio.volume);
   };
   applySettings();
   window.addEventListener('resize', () => followCam.applyProjection(renderer.camera));
@@ -71,6 +74,7 @@ async function main(): Promise<void> {
     last = performance.now();
     accumulator = 0;
     input.blockJumpUntilRelease();
+    sound.start(); // user gesture: safe to create the AudioContext
   };
   setController(null);
   setCamMode(followCam.ballCam);
@@ -86,6 +90,13 @@ async function main(): Promise<void> {
   let lastBoostState = '';
   let ballCamBeforeGoal = followCam.ballCam;
   let wasInGoalPause = false;
+  // Sound event tracking (frame-level edges).
+  let prevJumping = false;
+  let prevGrounded = true;
+  let airTime = 0;
+  let prevWorldContact = false;
+  let prevPadCooldowns = game.pads.map((p) => p.cooldown);
+  let prevScoreTotal = 0;
 
   const frame = (now: number): void => {
     const frameDt = Math.min((now - last) / 1000, 0.1);
@@ -137,8 +148,47 @@ async function main(): Promise<void> {
     if (steps === 12) accumulator = 0; // Tab was hidden or the machine stalled; drop the backlog.
     const alpha = Math.min(1, accumulator / TICK_DT);
 
-    renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.car.boosting, game.car.supersonic, game.ballVisible);
+    renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.ballVisible);
     renderer.syncPads(game.pads);
+
+    // Car visuals: wheel spin from forward speed, front wheels steered by RL's steer curve.
+    const lvNow = game.car.body.linvel();
+    const cq = renderer.carGroup.quaternion;
+    const fwdX = -(2 * (cq.x * cq.z + cq.w * cq.y));
+    const fwdZ = -(1 - 2 * (cq.x * cq.x + cq.y * cq.y));
+    const forwardSpeed = lvNow.x * fwdX + lvNow.z * fwdZ;
+    const steerAngle = fi.car.steer * curve(CAR.steerAngleFromSpeedCurve, Math.abs(forwardSpeed) / UU);
+    renderer.syncCar({ steerAngle, forwardSpeed, boosting: game.car.boosting, supersonic: game.car.supersonic }, frameDt);
+
+    // Sound events from state edges.
+    const grounded = game.car.grounded;
+    const jumped = game.car.isJumping && !prevJumping;
+    const landed = grounded && !prevGrounded && airTime > 0.25;
+    airTime = grounded ? 0 : airTime + frameDt;
+    let padCollected: 0 | 1 | 2 = 0;
+    for (let i = 0; i < game.pads.length; i++) {
+      if (prevPadCooldowns[i] === 0 && game.pads[i].cooldown > 0) padCollected = game.pads[i].big ? 2 : 1;
+      prevPadCooldowns[i] = game.pads[i].cooldown;
+    }
+    const scoreTotal = game.score.blue + game.score.orange;
+    const wallHit = game.car.worldContact && !prevWorldContact ? Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU : 0;
+    sound.update({
+      speedUU: Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU,
+      throttle: fi.car.throttle,
+      boosting: game.car.boosting,
+      grounded,
+      jumped,
+      landed,
+      padCollected,
+      ballHitSpeedUU: game.ballHitRelSpeed / UU,
+      ballBounceSpeedUU: game.ballBounceDeltaV / UU,
+      goal: scoreTotal > prevScoreTotal,
+      wallHitSpeedUU: wallHit,
+    });
+    prevJumping = game.car.isJumping;
+    prevGrounded = grounded;
+    prevWorldContact = game.car.worldContact;
+    prevScoreTotal = scoreTotal;
     const q = renderer.carGroup.quaternion;
     const upY = 1 - 2 * (q.x * q.x + q.z * q.z);
     followCam.update(renderer.camera, renderer.carGroup, renderer.ballMesh, { holdHeading: game.car.isFlipping || Math.abs(upY) < 0.35 }, frameDt);

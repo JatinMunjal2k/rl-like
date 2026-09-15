@@ -70,6 +70,13 @@ The car follows RocketSim's reverse-engineered vehicle:
 - Car-ball restitution ends at 0.18 (RL 0.0); friction is exact (2.0).
 - Arena ramps are quarter circles of 256 uu (floor) and 200 uu (ceiling) built from flat segments; RL's mesh is hand-modelled and not distributable. Unknown and omitted: the blend between corner walls and side/back walls, rounded goal posts and crossbar.
 
+## Visuals and sound
+
+- Walls are opaque and single-sided (normals face inward), so the floor beyond the arena is hidden while a camera outside the wall still sees in.
+- The floor is one static 2048 px texture: turf stripes, boundary, goal lines, centre circle, goal boxes and arcs, boost pad rings. Drawn once at startup, zero per-frame cost.
+- The car is a Fennec-style body of a dozen boxes on the Octane hitbox, with four wheels at RL's hardpoints that spin with forward speed and steer with RL's steer-angle curve.
+- All sound is synthesised in WebAudio (no files): engine pitch and brightness follow speed and throttle, a band-passed noise roar while boosting, chimes for pads, thumps for jump and landing, a hollow pock for ball hits scaled by relative speed, a bump for wall hits and a horn for goals. Volume is in Settings → Gameplay.
+
 ## Settings
 
 Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges and defaults) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone). The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.

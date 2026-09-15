@@ -77,6 +77,11 @@ export class Game {
   lastGoalSpeed = 0;
   /** True on ticks where the car touched the ball. */
   ballTouched = false;
+  /** Relative car-ball speed (m/s) on the tick of a touch, else 0. */
+  ballHitRelSpeed = 0;
+  /** Magnitude of the ball's velocity change (m/s) this tick when it was not touching the car (arena bounce), else 0. */
+  ballBounceDeltaV = 0;
+  private readonly ballVelBefore = { x: 0, y: 0, z: 0 };
   /** Index into KICKOFF_SPAWNS used for the current kickoff. */
   currentSpawn = 4;
 
@@ -122,15 +127,28 @@ export class Game {
       }
     }
 
+    const bv0 = this.ball.linvel();
+    this.ballVelBefore.x = bv0.x;
+    this.ballVelBefore.y = bv0.y;
+    this.ballVelBefore.z = bv0.z;
+
     this.car.tick(input, dt);
     this.world.step();
     this.car.postStep();
     this.tick++;
 
     this.updatePads(dt);
+    this.ballHitRelSpeed = 0;
+    this.ballBounceDeltaV = 0;
     if (this.goalPause === 0) {
       this.applyCarBallExtraImpulse();
       this.clampBall();
+      if (!this.ballTouched) {
+        const bv1 = this.ball.linvel();
+        // Gravity alone changes vy by g*dt; anything well beyond that is a bounce.
+        const dv = Math.hypot(bv1.x - this.ballVelBefore.x, bv1.y - this.ballVelBefore.y + GRAVITY * dt, bv1.z - this.ballVelBefore.z);
+        if (dv > 1.0) this.ballBounceDeltaV = dv;
+      }
     } else {
       this.ballTouched = false;
     }
@@ -258,6 +276,7 @@ export class Game {
     const cv = this.car.body.linvel();
     relVel.set(bv.x - cv.x, bv.y - cv.y, bv.z - cv.z);
     const relSpeed = Math.min(relVel.length(), BALL_CAR_EXTRA_IMPULSE.maxDeltaVel);
+    this.ballHitRelSpeed = relVel.length();
     if (relSpeed <= 0) return;
 
     const bp = this.ball.translation();

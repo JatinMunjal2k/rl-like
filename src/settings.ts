@@ -26,11 +26,16 @@ export interface Settings {
     /** Stick magnitude needed for a dodge instead of a double jump. RL: 0.5–0.9, default 0.5. */
     dodgeDeadzone: number;
   };
+  audio: {
+    /** Master volume 0–1. */
+    volume: number;
+  };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   camera: { fov: 110, distance: 270, height: 110, angle: -3, stiffness: 0.5 },
   controls: { steeringSensitivity: 1.0, aerialSensitivity: 1.0, deadzone: 0.2, dodgeDeadzone: 0.5 },
+  audio: { volume: 0.6 },
 };
 
 export type SettingSection = keyof Settings;
@@ -39,6 +44,8 @@ export interface SettingDef {
   section: SettingSection;
   key: string;
   label: string;
+  /** One or two sentences shown under the label. */
+  description: string;
   min: number;
   max: number;
   step: number;
@@ -47,18 +54,111 @@ export interface SettingDef {
 }
 
 export const CAMERA_DEFS: SettingDef[] = [
-  { section: 'camera', key: 'fov', label: 'Field of view', min: 60, max: 110, step: 1, unit: '°', decimals: 0 },
-  { section: 'camera', key: 'distance', label: 'Distance', min: 100, max: 400, step: 10, decimals: 0 },
-  { section: 'camera', key: 'height', label: 'Height', min: 40, max: 200, step: 10, decimals: 0 },
-  { section: 'camera', key: 'angle', label: 'Angle', min: -15, max: 0, step: 1, unit: '°', decimals: 0 },
-  { section: 'camera', key: 'stiffness', label: 'Stiffness', min: 0, max: 1, step: 0.05, decimals: 2 },
+  {
+    section: 'camera',
+    key: 'fov',
+    label: 'Field of view',
+    description: 'How wide the camera sees, in degrees. Higher shows more of the field but makes the ball look smaller and farther away.',
+    min: 60,
+    max: 110,
+    step: 1,
+    unit: '°',
+    decimals: 0,
+  },
+  {
+    section: 'camera',
+    key: 'distance',
+    label: 'Distance',
+    description: 'How far the camera sits behind the car. Higher shows more of your surroundings; lower keeps the car large and close.',
+    min: 100,
+    max: 400,
+    step: 10,
+    decimals: 0,
+  },
+  {
+    section: 'camera',
+    key: 'height',
+    label: 'Height',
+    description: 'How high the camera sits above the car. Higher gives a more top-down view of the ball and floor.',
+    min: 40,
+    max: 200,
+    step: 10,
+    decimals: 0,
+  },
+  {
+    section: 'camera',
+    key: 'angle',
+    label: 'Angle',
+    description: 'Tilts the camera down (negative) or level. More negative shows more floor and less sky.',
+    min: -15,
+    max: 0,
+    step: 1,
+    unit: '°',
+    decimals: 0,
+  },
+  {
+    section: 'camera',
+    key: 'stiffness',
+    label: 'Stiffness',
+    description: 'How tightly the camera follows the car. 0 lags and floats, giving a sense of speed; 1 locks the car in place on screen.',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    decimals: 2,
+  },
 ];
 
 export const CONTROL_DEFS: SettingDef[] = [
-  { section: 'controls', key: 'steeringSensitivity', label: 'Steering sensitivity', min: 1, max: 10, step: 0.1, decimals: 1 },
-  { section: 'controls', key: 'aerialSensitivity', label: 'Aerial sensitivity', min: 1, max: 10, step: 0.1, decimals: 1 },
-  { section: 'controls', key: 'deadzone', label: 'Controller deadzone', min: 0.05, max: 0.5, step: 0.05, decimals: 2 },
-  { section: 'controls', key: 'dodgeDeadzone', label: 'Dodge deadzone', min: 0.5, max: 0.9, step: 0.05, decimals: 2 },
+  {
+    section: 'controls',
+    key: 'steeringSensitivity',
+    label: 'Steering sensitivity',
+    description: 'Multiplies the stick when steering on the ground. Above 1 you reach full lock with less stick travel; it never exceeds full lock.',
+    min: 1,
+    max: 10,
+    step: 0.1,
+    decimals: 1,
+  },
+  {
+    section: 'controls',
+    key: 'aerialSensitivity',
+    label: 'Aerial sensitivity',
+    description: 'Multiplies the stick for pitch, yaw and air roll in the air. Higher makes small stick movements rotate the car faster.',
+    min: 1,
+    max: 10,
+    step: 0.1,
+    decimals: 1,
+  },
+  {
+    section: 'controls',
+    key: 'deadzone',
+    label: 'Controller deadzone',
+    description: 'Stick movement below this is ignored, which hides drift from a worn stick. Lower feels more responsive; too low and the car twitches on its own.',
+    min: 0.05,
+    max: 0.5,
+    step: 0.05,
+    decimals: 2,
+  },
+  {
+    section: 'controls',
+    key: 'dodgeDeadzone',
+    label: 'Dodge deadzone',
+    description: 'How far the stick must be pushed when you press jump in the air to dodge instead of double-jumping. Higher makes accidental flips less likely.',
+    min: 0.5,
+    max: 0.9,
+    step: 0.05,
+    decimals: 2,
+  },
+  {
+    section: 'audio',
+    key: 'volume',
+    label: 'Sound volume',
+    description: 'Master volume for engine, boost, hits and goals.',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    decimals: 2,
+  },
 ];
 
 const STORAGE_KEY = 'rl-like.settings.v1';
@@ -69,7 +169,7 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return s;
     const parsed = JSON.parse(raw) as Partial<Record<SettingSection, Record<string, number>>>;
-    for (const section of ['camera', 'controls'] as SettingSection[]) {
+    for (const section of ['camera', 'controls', 'audio'] as SettingSection[]) {
       const target = s[section] as unknown as Record<string, number>;
       for (const [k, v] of Object.entries(parsed[section] ?? {})) {
         if (k in target && typeof v === 'number' && Number.isFinite(v)) target[k] = v;

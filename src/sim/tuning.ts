@@ -68,7 +68,7 @@ export const TUNING = {
    */
   rampRadiusFloor: 256 * UU,
   rampRadiusCeiling: 200 * UU,
-  rampSegments: 6,
+  rampSegments: 12, // 7.5° facets; coarser facets made low bounces depend on which facet the ball hit
   wallThickness: 1.0, // m, for the box colliders behind the goal mouths
 
   // ------------------------------------------------------------------------------

@@ -299,7 +299,11 @@ export class Menu {
     defs.forEach((def, r) => {
       const row = el('div', 'slider-row');
       const name = el('div', 'slider-label');
-      name.textContent = def.label;
+      const title = el('div', 'slider-title');
+      title.textContent = def.label;
+      const desc = el('div', 'slider-desc');
+      desc.textContent = def.description;
+      name.append(title, desc);
       const minus = button('−', () => adjust(-1));
       minus.classList.add('adj');
       const val = el('div', 'slider-value');
@@ -329,8 +333,9 @@ export class Menu {
     const footer = el('div', 'menu-row');
     p.el.appendChild(footer);
     this.addButton(p, footer, 'Reset to defaults', defs.length, 0, () => {
-      const section = defs[0].section;
-      Object.assign(this.settings[section], structuredClone(DEFAULT_SETTINGS[section]));
+      for (const section of new Set(defs.map((d) => d.section))) {
+        Object.assign(this.settings[section], structuredClone(DEFAULT_SETTINGS[section]));
+      }
       for (const row of list.children) (row as HTMLElement & { refresh?: () => void }).refresh?.();
       this.onSettingsChanged?.();
     });

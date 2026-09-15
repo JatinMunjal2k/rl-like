@@ -82,7 +82,9 @@ The car follows RocketSim's reverse-engineered vehicle:
 
 Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges; defaults are the common pro setup 110 / 270 / 100 / -3 / 0.45) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone, sound volume). Every slider has a description. The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
 
-Ball cam places the camera on the 3D line from the ball through the car, so a high ball pushes the camera down toward the floor (clamped) and the car stays in the lower part of the frame. Car cam looks level along the car's heading, tilted by the angle setting. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
+Ball cam places the camera on the 3D line from the ball through the car. When that would put it underground, the camera sits on the floor a full `distance` from the car instead of collapsing onto it, and the look direction is capped so the car never leaves the bottom of the frame: a high ball rides at the top of the screen with the car below it. Car cam looks level along the car's heading, tilted by the angle setting. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
+
+Car-ball contact follows RocketSim's `_OnHit`: restitution 0, the extra impulse computed from pre-collision velocities and positions, applied at most every other tick and only while the ball is still approaching. A 2000 uu/s flat hit on a resting ball leaves at about 3050 uu/s and 16°, peaking around 7 m.
 
 ## Match flow and HUD
 

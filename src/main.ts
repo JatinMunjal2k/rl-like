@@ -56,6 +56,8 @@ async function main(): Promise<void> {
   (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__game = game;
   (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__input = input;
   (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__menu = menu;
+  (window as unknown as { __renderer: Renderer; __camera: FollowCamera }).__renderer = renderer;
+  (window as unknown as { __renderer: Renderer; __camera: FollowCamera }).__camera = followCam;
 
   const applySettings = () => {
     saveSettings(settings);

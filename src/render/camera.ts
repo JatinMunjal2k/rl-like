@@ -64,13 +64,38 @@ export class FollowCamera {
       dir.subVectors(carPos, ballPos);
       if (dir.lengthSq() < 0.25) dir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
       dir.normalize();
+      // Horizontal direction from ball to car, used when the 3D line would put the camera underground.
+      let hx = dir.x;
+      let hz = dir.z;
+      const hl = Math.hypot(hx, hz);
+      if (hl > 1e-4) {
+        hx /= hl;
+        hz /= hl;
+      } else {
+        hx = Math.sin(this.yaw);
+        hz = Math.cos(this.yaw);
+      }
       desired.copy(carPos).addScaledVector(dir, distance);
       desired.y += height;
-      desiredLook.copy(ballPos);
+      if (desired.y < MIN_CAMERA_HEIGHT) {
+        // Stay a full `distance` from the car while sitting on the floor: slide the camera out
+        // horizontally instead of collapsing onto the car. Keeps the car in the lower frame.
+        const dy = carPos.y - MIN_CAMERA_HEIGHT;
+        const h = Math.sqrt(Math.max(distance * distance - dy * dy, (0.6 * distance) ** 2));
+        desired.set(carPos.x + hx * h, MIN_CAMERA_HEIGHT, carPos.z + hz * h);
+      }
+      // Look at the ball, but never let the car leave the bottom of the frame: cap the look
+      // elevation so the car stays inside the vertical field of view (with the angle tilt).
+      const vHalf = ((camera.fov / 2) * Math.PI) / 180 - 0.06;
+      const toBall = desiredLook.copy(ballPos).sub(desired);
+      const toCar = dir.copy(carPos).sub(desired); // reuse scratch
+      const eBall = Math.atan2(toBall.y, Math.hypot(toBall.x, toBall.z));
+      const eCar = Math.atan2(toCar.y, Math.hypot(toCar.x, toCar.z));
+      const eLook = Math.min(eBall, eCar + vHalf - angleRad);
+      const hd = Math.hypot(toBall.x, toBall.z);
+      desiredLook.set(desired.x + toBall.x, desired.y + Math.tan(eLook) * hd, desired.z + toBall.z);
       // Keep the heading in sync so switching to car cam does not swing.
-      const hx = -dir.x;
-      const hz = -dir.z;
-      if (hx * hx + hz * hz > 1e-4) this.yaw = Math.atan2(hx, hz);
+      this.yaw = Math.atan2(-hx, -hz);
     } else {
       if (!state.holdHeading) {
         const targetYaw = headingYaw(car.quaternion, this.yaw);

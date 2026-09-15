@@ -165,7 +165,9 @@ export class Car {
         )
         .setFriction(CAR.worldFriction)
         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
-        .setRestitution(CAR.worldRestitution)
+        // 0 so car-ball comes out at RL's 0.0 (Min against the ball's Max 0). Costs car-arena
+        // restitution (RL 0.3); see tuning.ts.
+        .setRestitution(0)
         .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min),
       this.body,
     );

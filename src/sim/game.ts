@@ -82,6 +82,10 @@ export class Game {
   /** Magnitude of the ball's velocity change (m/s) this tick when it was not touching the car (arena bounce), else 0. */
   ballBounceDeltaV = 0;
   private readonly ballVelBefore = { x: 0, y: 0, z: 0 };
+  private readonly ballPosBefore = { x: 0, y: 0, z: 0 };
+  private readonly carVelBefore = { x: 0, y: 0, z: 0 };
+  private readonly carPosBefore = { x: 0, y: 0, z: 0 };
+  private lastExtraImpulseTick = -10;
   /** Index into KICKOFF_SPAWNS used for the current kickoff. */
   currentSpawn = 4;
 
@@ -127,12 +131,27 @@ export class Game {
       }
     }
 
+    // Pre-step state, used by the car-ball extra impulse like RocketSim's contact callback
+    // (which runs before the solver) and by the bounce detector.
     const bv0 = this.ball.linvel();
     this.ballVelBefore.x = bv0.x;
     this.ballVelBefore.y = bv0.y;
     this.ballVelBefore.z = bv0.z;
+    const bp0 = this.ball.translation();
+    this.ballPosBefore.x = bp0.x;
+    this.ballPosBefore.y = bp0.y;
+    this.ballPosBefore.z = bp0.z;
 
     this.car.tick(input, dt);
+    const cv0 = this.car.body.linvel();
+    this.carVelBefore.x = cv0.x;
+    this.carVelBefore.y = cv0.y;
+    this.carVelBefore.z = cv0.z;
+    const cp0 = this.car.body.translation();
+    this.carPosBefore.x = cp0.x;
+    this.carPosBefore.y = cp0.y;
+    this.carPosBefore.z = cp0.z;
+
     this.world.step();
     this.car.postStep();
     this.tick++;
@@ -272,16 +291,27 @@ export class Game {
     this.ballTouched = touching;
     if (!touching) return;
 
-    const bv = this.ball.linvel();
-    const cv = this.car.body.linvel();
+    // RocketSim evaluates this in the contact-added callback, i.e. with PRE-collision velocities
+    // and positions, and applies it at most every other tick while contact persists.
+    const bv = this.ballVelBefore;
+    const cv = this.carVelBefore;
     relVel.set(bv.x - cv.x, bv.y - cv.y, bv.z - cv.z);
-    const relSpeed = Math.min(relVel.length(), BALL_CAR_EXTRA_IMPULSE.maxDeltaVel);
     this.ballHitRelSpeed = relVel.length();
+    if (this.tick <= this.lastExtraImpulseTick + 1) return;
+    const relSpeed = Math.min(relVel.length(), BALL_CAR_EXTRA_IMPULSE.maxDeltaVel);
     if (relSpeed <= 0) return;
+    this.lastExtraImpulseTick = this.tick;
 
-    const bp = this.ball.translation();
-    const cp = this.car.body.translation();
+    const bp = this.ballPosBefore;
+    const cp = this.carPosBefore;
     hitDir.set(bp.x - cp.x, (bp.y - cp.y) * BALL_CAR_EXTRA_IMPULSE.zScale, bp.z - cp.z).normalize();
+    // Bullet only reports a contact while the bodies approach or rest; Rapier can keep a manifold
+    // for a tick after the ball has already been kicked away. Skip those separating ticks so one
+    // hit does not fire twice.
+    if (relVel.dot(hitDir) > 0.5) {
+      this.lastExtraImpulseTick = -10;
+      return;
+    }
 
     const cr = this.car.body.rotation();
     carRot.set(cr.x, cr.y, cr.z, cr.w);
@@ -291,7 +321,9 @@ export class Game {
 
     const factor = curve(BALL_CAR_EXTRA_IMPULSE.factorCurve, relSpeed / UU);
     const add = relSpeed * factor;
-    this.ball.setLinvel({ x: bv.x + hitDir.x * add, y: bv.y + hitDir.y * add, z: bv.z + hitDir.z * add }, true);
+    // Added on top of the post-collision velocity (RocketSim's _velocityImpulseCache at tick end).
+    const bvNow = this.ball.linvel();
+    this.ball.setLinvel({ x: bvNow.x + hitDir.x * add, y: bvNow.y + hitDir.y * add, z: bvNow.z + hitDir.z * add }, true);
   }
 
   private clampBall(): void {
@@ -319,13 +351,14 @@ export class Game {
         .setCanSleep(false),
     );
     const volume = (4 / 3) * Math.PI * BALL.radius ** 3;
-    // Combine rules (see tuning.ts): restitution ball-arena 0.6, car-arena 0.3, car-ball 0.18;
-    // friction ball-arena 0.35 (arena carries the ball's value), car-ball 2.0 via the car's Max rule.
+    // Combine rules (see tuning.ts): restitution ball-arena 0.6 (arena carries it, ball 0 with Max),
+    // car-ball 0.0 as in RL, car-arena 0.0 (RL 0.3, the compromise); friction ball-arena 0.35
+    // (arena carries the ball's value), car-ball 2.0 via the car's Max rule.
     const collider = this.world.createCollider(
       RAPIER.ColliderDesc.ball(BALL.radius)
         .setDensity(BALL.mass / volume)
-        .setRestitution(BALL.restitution)
-        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Multiply)
+        .setRestitution(BALL.carRestitution)
+        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Max)
         .setFriction(BALL.carFriction)
         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min),
       body,
@@ -341,7 +374,7 @@ export class Game {
       desc
         .setFriction(BALL.friction)
         .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
-        .setRestitution(1.0) // multiplied by the ball's 0.6; the car uses Min with its own 0.3
+        .setRestitution(BALL.restitution) // ball picks it up with Max; the car's Min with 0 gives 0
         .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min);
 
     // ORIENTED: the shell's normals point into the arena, so deep penetrations still push inward.

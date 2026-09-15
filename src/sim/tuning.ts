@@ -47,11 +47,12 @@ export const TUNING = {
   /**
    * RL wants ball-arena restitution 0.6, car-arena 0.3 and car-ball 0.0. Rapier combines per pair
    * with one rule chosen by priority (Max > Multiply > Min > Average) and no assignment
-   * reproduces all three. We use ball 0.6 (Multiply), arena 1.0 (Min), car 0.3 (Min), which
-   * gives 0.6 / 0.3 / 0.18. Friction is exact for the pairs that matter:
+   * reproduces all three. We use ball 0 (Max), arena 0.6 (Min), car 0 (Min), which gives
+   * ball-arena 0.6 and car-ball 0.0 exactly and car-arena 0.0 (RL 0.3): cars slide along walls
+   * instead of bouncing slightly. Friction is exact for the pairs that matter:
    * ball 2.0 (Min), arena 0.35 (Min), car 0.3 (Max) -> ball-arena 0.35, car-ball 2.0, car-arena 0.35 (RL 0.3).
    */
-  carBallRestitutionActual: 0.18,
+  carArenaRestitutionActual: 0.0,
   carArenaFrictionActual: 0.35,
 
   // ------------------------------------------------------------------------------

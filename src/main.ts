@@ -220,28 +220,28 @@ async function main(): Promise<void> {
   // would freeze a hosted match for everyone. Worker timers are not throttled, so a tiny worker
   // pings the page every few milliseconds and, whenever the frame loop has not run for a while
   // (hidden tab, minimised window, or any other stall), the network session is advanced from
-  // those pings instead (no rendering).
-  let lastBackgroundTick = performance.now();
+  // those pings instead (no rendering). Both paths draw their time from the same clock,
+  // `lastSessionUpdate`, so running both can never count the same wall time twice.
+  let lastSessionUpdate = performance.now();
   let lastFrameAt = performance.now();
+  const sessionDt = (now: number): number => {
+    const dt = Math.min((now - lastSessionUpdate) / 1000, 0.1);
+    lastSessionUpdate = now;
+    return dt;
+  };
   try {
     const src = 'setInterval(() => postMessage(0), 4);';
     const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
     worker.onmessage = () => {
       if (!session || session.kind === 'local') return;
       const now = performance.now();
-      if (!document.hidden && now - lastFrameAt < 50) return; // the frame loop is doing its job
-      const dt = Math.min((now - lastBackgroundTick) / 1000, 0.1);
-      lastBackgroundTick = now;
-      session.update(EMPTY_INPUT, dt, true);
-      last = now; // the frame loop resumes from here when the tab is shown again
+      if (now - lastFrameAt < 50) return; // the frame loop is doing its job
+      session.update(EMPTY_INPUT, sessionDt(now), true);
+      last = now; // the frame loop resumes from here when frames come back
     };
   } catch {
     /* no worker: the tab must stay visible to host */
   }
-  document.addEventListener('visibilitychange', () => {
-    lastBackgroundTick = performance.now();
-    last = performance.now();
-  });
 
   // --- Frame loop ------------------------------------------------------------------
 
@@ -269,6 +269,7 @@ async function main(): Promise<void> {
 
   const resetFrameTimers = () => {
     last = performance.now();
+    lastSessionUpdate = last;
   };
 
   const showBanner = (title: string, speed: string, sub: string, color: string, ms: number) => {
@@ -300,7 +301,7 @@ async function main(): Promise<void> {
     if (menu.open) menu.navigate(fi.nav, frameDt);
 
     // Networked sessions keep running behind the menu; free play pauses.
-    session?.update(menu.open ? EMPTY_INPUT : fi.car, frameDt, menu.open);
+    session?.update(menu.open ? EMPTY_INPUT : fi.car, sessionDt(now), menu.open);
 
     const game = session?.game ?? null;
     const localCar = game?.cars.get(session!.localId) ?? null;

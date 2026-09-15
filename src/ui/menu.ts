@@ -185,11 +185,20 @@ export class Menu {
   // ---------------------------------------------------------------------------
 
   private buildMain(): void {
-    const p = this.addPanel('main', 'hidden', 'RL-like');
+    const p = this.addPanel('main', 'hidden', '');
+    const title = p.el.querySelector('.menu-title')!;
+    title.innerHTML = 'RL<span class="accent">-</span>like';
+    const sub = el('div', 'menu-subtitle');
+    sub.textContent = 'Browser car soccer · free play';
+    title.after(sub);
     this.playButton = this.addButton(p, p.el, 'Free Play', 0, 0, () => this.play());
+    this.playButton.classList.add('primary');
     this.addButton(p, p.el, 'Settings', 1, 0, () => this.show('settings'));
     const hint = el('p', 'menu-hint');
-    hint.textContent = 'Esc / Start opens this menu during play. Navigate with D-pad or stick, A to select, B to go back.';
+    hint.innerHTML =
+      '<span class="btn-glyph">Esc</span> / <span class="btn-glyph">Start</span> opens this menu during play. ' +
+      'Navigate with the D-pad or stick, <span class="btn-glyph">A</span> selects, <span class="btn-glyph">B</span> goes back. ' +
+      'Keyboard: arrows, <kbd>Enter</kbd>, <kbd>Backspace</kbd>.';
     p.el.appendChild(hint);
   }
 

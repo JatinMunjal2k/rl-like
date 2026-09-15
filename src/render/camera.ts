@@ -9,19 +9,25 @@ const desired = new THREE.Vector3();
 const desiredLook = new THREE.Vector3();
 const twist = new THREE.Quaternion();
 
+/** Camera never goes below this height, like RL's floor clamp. */
+const MIN_CAMERA_HEIGHT = 0.35;
+
 export interface CameraCarState {
   /** Heading updates are held while the car is flipping or near inverted (see below). */
   holdHeading: boolean;
 }
 
 /**
- * Rocket League style chase camera with a ball-cam toggle, driven by RL's camera settings
- * (FOV, distance, height, angle, stiffness).
+ * Rocket League chase camera, driven by RL's camera settings (FOV, distance, height, angle, stiffness).
  *
- * Car cam follows the car's HEADING only: the "twist" of the car's rotation about world up
- * (swing-twist decomposition). That stays put through front flips and rolls about horizontal
- * axes, but it is ill-conditioned when the car is near inverted and drifts when a flip's axis
- * is tilted, so the heading target is frozen while the car flips or is close to upside down.
+ * Ball cam: the camera sits on the 3D line from the ball through the car, `distance` behind the
+ * car and `height` above it, then looks at the ball. Because the line is 3D, a high ball pushes
+ * the camera down toward the floor (clamped), so the car stays in the lower part of the frame
+ * instead of scrolling off the bottom.
+ *
+ * Car cam: the camera sits behind the car's heading and looks level along it, tilted by `angle`.
+ * The heading is the swing-twist yaw of the car's rotation about world up, which stays put
+ * through flips about horizontal axes; it is frozen while the car flips or is near inverted.
  */
 export class FollowCamera {
   ballCam = true;
@@ -49,20 +55,22 @@ export class FollowCamera {
     const posSmooth = 3 + s.stiffness * 27;
     const lookSmooth = posSmooth * 1.4;
     const yawSmooth = 4 + s.stiffness * 8;
+    const angleRad = (s.angle * Math.PI) / 180;
 
     carPos.copy(car.position);
     ballPos.copy(ball.position);
 
     if (this.ballCam) {
       dir.subVectors(carPos, ballPos);
-      dir.y = 0;
       if (dir.lengthSq() < 0.25) dir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
       dir.normalize();
       desired.copy(carPos).addScaledVector(dir, distance);
-      desired.y = carPos.y + height;
+      desired.y += height;
       desiredLook.copy(ballPos);
       // Keep the heading in sync so switching to car cam does not swing.
-      this.yaw = Math.atan2(-dir.x, -dir.z);
+      const hx = -dir.x;
+      const hz = -dir.z;
+      if (hx * hx + hz * hz > 1e-4) this.yaw = Math.atan2(hx, hz);
     } else {
       if (!state.holdHeading) {
         const targetYaw = headingYaw(car.quaternion, this.yaw);
@@ -73,10 +81,11 @@ export class FollowCamera {
       const fx = -Math.sin(this.yaw);
       const fz = -Math.cos(this.yaw);
       desired.set(carPos.x - fx * distance, carPos.y + height, carPos.z - fz * distance);
-      desiredLook.set(carPos.x + fx * 8, carPos.y + 0.8, carPos.z + fz * 8);
+      // Look level along the heading from the camera's own height, so the car sits low in frame.
+      desiredLook.set(desired.x + fx * 20, desired.y, desired.z + fz * 20);
     }
 
-    desired.y = Math.max(desired.y, 0.6);
+    desired.y = Math.max(desired.y, MIN_CAMERA_HEIGHT);
 
     if (!this.initialized) {
       camera.position.copy(desired);
@@ -89,7 +98,7 @@ export class FollowCamera {
     }
     camera.lookAt(this.look);
     // RL's "angle": negative tilts the view down.
-    camera.rotateX((s.angle * Math.PI) / 180);
+    camera.rotateX(angleRad);
   }
 }
 

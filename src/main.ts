@@ -23,8 +23,10 @@ const boostValueEl = document.getElementById('boostValue')!;
 
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 56;
 boostFillEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
-/** Speed readout goes red only at the hard cap (within 10 uu/s of 2300). */
-const MAX_SPEED_UU = CAR.maxSpeed / UU - 10;
+/** uu/s -> km/h (1 uu = 1 cm). */
+const UU_S_TO_KMH = 0.036;
+/** Speed readout goes red only at the hard cap (within 10 uu/s of 2300, shown in km/h). */
+const MAX_SPEED_KMH = (CAR.maxSpeed / UU - 10) * UU_S_TO_KMH;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -196,11 +198,11 @@ async function main(): Promise<void> {
 
     // --- HUD ---------------------------------------------------------------------
     const lv = game.car.body.linvel();
-    const speedUU = Math.round(Math.hypot(lv.x, lv.y, lv.z) / UU / 10) * 10;
-    if (speedUU !== lastSpeedUU) {
-      lastSpeedUU = speedUU;
-      speedValueEl.textContent = String(speedUU);
-      speedEl.classList.toggle('max', speedUU >= MAX_SPEED_UU);
+    const speedKmh = Math.round((Math.hypot(lv.x, lv.y, lv.z) / UU) * UU_S_TO_KMH);
+    if (speedKmh !== lastSpeedUU) {
+      lastSpeedUU = speedKmh;
+      speedValueEl.textContent = String(speedKmh);
+      speedEl.classList.toggle('max', speedKmh >= MAX_SPEED_KMH);
     }
 
     const boost = Math.round(game.car.boost);
@@ -229,7 +231,7 @@ async function main(): Promise<void> {
       if (game.lastGoal) {
         const uu = game.lastGoalSpeed / UU;
         bannerTitleEl.textContent = game.lastGoal === 'blue' ? 'GOAL!' : 'OWN GOAL';
-        bannerSpeedEl.textContent = `${Math.round(uu * 0.036)} km/h  ·  ${Math.round(uu)} uu/s`;
+        bannerSpeedEl.textContent = `${Math.round(uu * UU_S_TO_KMH)} km/h`;
         bannerEl.style.color = game.lastGoal === 'blue' ? '#4aa3ff' : '#ff9a3c';
         bannerEl.style.display = 'block';
         bannerUntil = now + 2500;

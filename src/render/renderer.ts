@@ -104,19 +104,32 @@ export class Renderer {
   // ---------------------------------------------------------------------------
 
   private buildArena(arena: ArenaGeometry): void {
-    // Floor: one static textured plane covering the field and both goals.
-    const floorGeo = new THREE.PlaneGeometry(arena.floorBox.hx * 2, arena.floorBox.hz * 2);
-    const floor = new THREE.Mesh(floorGeo, new THREE.MeshLambertMaterial({ map: makeFieldTexture() }));
+    // Floor: one static textured plane covering the field and both goals. The texture is drawn in
+    // the plane's own metres so markings land exactly on the physics positions.
+    const floorW = arena.floorBox.hx * 2;
+    const floorL = arena.floorBox.hz * 2;
+    const floorGeo = new THREE.PlaneGeometry(floorW, floorL);
+    const floor = new THREE.Mesh(floorGeo, new THREE.MeshLambertMaterial({ map: makeFieldTexture(floorW, floorL) }));
     floor.rotation.x = -Math.PI / 2;
     this.scene.add(floor);
 
     // Wall shell straight from the physics trimesh, opaque and single-sided: the normals point
     // into the arena, so it is solid from inside and see-through when the camera is outside.
+    // UVs: u runs along the wall (world x + z works for both wall directions), v is height.
     const shell = new THREE.BufferGeometry();
     shell.setAttribute('position', new THREE.BufferAttribute(arena.vertices, 3));
+    const uv = new Float32Array((arena.vertices.length / 3) * 2);
+    for (let i = 0; i < arena.vertices.length / 3; i++) {
+      const x = arena.vertices[i * 3];
+      const y = arena.vertices[i * 3 + 1];
+      const z = arena.vertices[i * 3 + 2];
+      uv[i * 2] = (x + z) / 8; // one panel every 8 m along the wall
+      uv[i * 2 + 1] = y / ARENA.height;
+    }
+    shell.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     shell.setIndex(new THREE.BufferAttribute(arena.indices, 1));
     shell.computeVertexNormals();
-    this.scene.add(new THREE.Mesh(shell, new THREE.MeshLambertMaterial({ color: 0x27354f, side: THREE.FrontSide })));
+    this.scene.add(new THREE.Mesh(shell, new THREE.MeshLambertMaterial({ map: makeWallTexture(), side: THREE.FrontSide })));
     this.scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(shell, 20), new THREE.LineBasicMaterial({ color: 0x5f7fb5, transparent: true, opacity: 0.55 })));
 
     // A light band along the walls at goal height, like the arena's glass line.
@@ -258,11 +271,9 @@ function applyInterpolated(obj: THREE.Object3D, a: BodyState, b: BodyState, alph
   obj.quaternion.copy(qA).slerp(qB, alpha);
 }
 
-/** Static field texture: turf stripes, RL-style markings, boost pad rings. Drawn once. */
-function makeFieldTexture(): THREE.Texture {
+/** Static field texture: turf stripes, RL-style markings, boost pad rings. Drawn once, in the plane's metres. */
+function makeFieldTexture(fieldW: number, fieldL: number): THREE.Texture {
   const W = 2048;
-  const fieldW = ARENA.extentX * 2;
-  const fieldL = (ARENA.extentY + ARENA.goalDepth) * 2;
   const Hpx = Math.round((W * fieldL) / fieldW);
   const cv = document.createElement('canvas');
   cv.width = W;
@@ -365,6 +376,70 @@ function makeFieldTexture(): THREE.Texture {
 
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+/** Static wall texture: dark panels with seams, a light rail at goal height, a glow strip near the top. Tiles along u. */
+function makeWallTexture(): THREE.Texture {
+  const W = 512;
+  const H = 1024;
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d')!;
+  // v = 0 at the floor is the bottom of the canvas.
+  const yPx = (frac: number) => H - frac * H;
+  const grad = ctx.createLinearGradient(0, H, 0, 0);
+  grad.addColorStop(0, '#1e2a40');
+  grad.addColorStop(0.35, '#273550');
+  grad.addColorStop(1, '#1a2438');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  // Panel seams: two panels per tile horizontally, rows at fixed heights.
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 4;
+  for (const u of [0, W / 2]) {
+    ctx.beginPath();
+    ctx.moveTo(u, 0);
+    ctx.lineTo(u, H);
+    ctx.stroke();
+  }
+  for (const frac of [0.15, 0.31, 0.5, 0.72]) {
+    ctx.beginPath();
+    ctx.moveTo(0, yPx(frac));
+    ctx.lineTo(W, yPx(frac));
+    ctx.stroke();
+  }
+  // Highlight edge on each seam.
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 2;
+  for (const frac of [0.15, 0.31, 0.5, 0.72]) {
+    ctx.beginPath();
+    ctx.moveTo(0, yPx(frac) - 3);
+    ctx.lineTo(W, yPx(frac) - 3);
+    ctx.stroke();
+  }
+  // Glass rail at goal height and a glow strip near the ceiling curve.
+  const goalFrac = ARENA.goalHeight / ARENA.height;
+  ctx.fillStyle = 'rgba(143,184,255,0.35)';
+  ctx.fillRect(0, yPx(goalFrac) - 5, W, 10);
+  ctx.fillStyle = 'rgba(255,179,71,0.25)';
+  ctx.fillRect(0, yPx(0.68) - 6, W, 12);
+  // Subtle vertical light streaks.
+  for (let i = 0; i < 6; i++) {
+    const x = ((i + 0.5) * W) / 6;
+    const g = ctx.createLinearGradient(0, H, 0, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(0.4, 'rgba(255,255,255,0.035)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - 6, 0, 12, H);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.anisotropy = 4;
   return tex;
 }

@@ -13,7 +13,7 @@ export interface Box {
 }
 
 export interface ArenaGeometry {
-  /** Triangle mesh for the wall shell: ramps, side walls, corners, back walls with goal mouths. Normals point into the arena. */
+  /** Triangle mesh for the wall shell: ramps, walls, blended corners, back walls with goal mouths. Normals point into the arena. */
   vertices: Float32Array;
   indices: Uint32Array;
   floorBox: Box;
@@ -31,34 +31,90 @@ export function allColliderBoxes(a: ArenaGeometry): Box[] {
 type P2 = [number, number]; // [x, z]
 
 /**
- * Builds the standard soccar arena analytically. See TUNING.rampRadius* for what is approximated.
- * Y is up. The long axis is Z (RL's y). Blue's goal is at -Z, orange's at +Z.
+ * Builds the standard soccar arena analytically, fitted to measurements of the real collision
+ * mesh (see TUNING.arena*). Y is up. The long axis is Z (RL's y). Blue's goal is at -Z, orange's at +Z.
+ *
+ * Outline (viewed from above): back walls at z = ±extentY, side walls at x = ±extentX, flat 45°
+ * corner walls on |x| + |z| = cornerPlane, blended into the back and side walls by circular arcs.
+ * Each outline edge carries its own floor-ramp radius; the ceiling curve is shared.
  */
 export function buildArenaGeometry(): ArenaGeometry {
   const W2 = ARENA.extentX;
   const L2 = ARENA.extentY;
   const H = ARENA.height;
-  const c = ARENA.cornerCut;
   const gw = ARENA.goalHalfWidth;
   const gh = ARENA.goalHeight;
   const gd = ARENA.goalDepth;
-  const rF = TUNING.rampRadiusFloor;
-  const rC = TUNING.rampRadiusCeiling;
+  const rSide = TUNING.arenaSideRampRadius;
+  const rBack = TUNING.arenaBackRampRadius;
+  const rCeil = TUNING.arenaCeilingRadius;
   const N = TUNING.rampSegments;
   const t = TUNING.wallThickness;
 
-  // Octagonal outline, counter-clockwise when viewed from above (+Y).
+  // ---- Outline with blended corners --------------------------------------------------
+  // Corner of back wall (z = L2) and diagonal (x + z = cornerPlane) lies at (cornerPlane - L2, L2);
+  // corner of diagonal and side wall (x = W2) at (W2, cornerPlane - W2). A fillet of radius R
+  // between two lines meeting at 45° has tangent points R * tan(22.5°) from the corner.
+  const tan225 = Math.tan(Math.PI / 8);
+  const rB = TUNING.arenaCornerBlendBack;
+  const rS = TUNING.arenaCornerBlendSide;
+  const dB = rB * tan225;
+  const dS = rS * tan225;
+  const cornerBackX = ARENA.cornerPlane - L2; // x where back wall meets the diagonal
+  const cornerSideZ = ARENA.cornerPlane - W2; // z where the diagonal meets the side wall
+  const diag = Math.SQRT1_2;
+  const blendSegs = TUNING.cornerBlendSegments;
+
+  /** Points of a fillet arc from tangent point A to tangent point B around centre C (inclusive of both ends). */
+  const arc = (a: P2, b: P2, c: P2): P2[] => {
+    const a0 = Math.atan2(a[1] - c[1], a[0] - c[0]);
+    let a1 = Math.atan2(b[1] - c[1], b[0] - c[0]);
+    while (a1 - a0 > Math.PI) a1 -= 2 * Math.PI;
+    while (a1 - a0 < -Math.PI) a1 += 2 * Math.PI;
+    const r = Math.hypot(a[0] - c[0], a[1] - c[1]);
+    const pts: P2[] = [];
+    for (let i = 0; i <= blendSegs; i++) {
+      const ang = a0 + ((a1 - a0) * i) / blendSegs;
+      pts.push([c[0] + r * Math.cos(ang), c[1] + r * Math.sin(ang)]);
+    }
+    return pts;
+  };
+
+  /**
+   * The corner of one quadrant, from the side-wall tangent point to the back-wall tangent point:
+   * side blend arc, the flat 45° wall, back blend arc. Built in the (+x, +z) frame and mirrored.
+   */
+  const sideTangentZ = cornerSideZ - dS;
+  const cornerPath = (sx: number, sz: number): P2[] => {
+    const p0: P2 = [W2, sideTangentZ];
+    const p1: P2 = [W2 - dS * diag, cornerSideZ + dS * diag];
+    const sideCentre: P2 = [W2 - rS, sideTangentZ];
+    const p2: P2 = [cornerBackX + dB * diag, L2 - dB * diag];
+    const p3: P2 = [cornerBackX - dB, L2];
+    const backCentre: P2 = [cornerBackX - dB, L2 - rB];
+    const pts = [...arc(p0, p1, sideCentre), ...arc(p2, p3, backCentre)];
+    return pts.map(([x, z]) => [sx * x, sz * z] as P2);
+  };
+
+  // Full outline, same orientation as before: up the +x side wall, along the +z back wall toward -x,
+  // down the -x side wall, along the -z back wall toward +x. Straight edges (back walls, side walls)
+  // are implied between consecutive corner paths, so each back wall is ONE edge spanning the goal.
   const outline: P2[] = [
-    [W2 - c, -L2],
-    [W2, -L2 + c],
-    [W2, L2 - c],
-    [W2 - c, L2],
-    [-(W2 - c), L2],
-    [-W2, L2 - c],
-    [-W2, -L2 + c],
-    [-(W2 - c), -L2],
+    ...cornerPath(1, 1), // (+x side) → (+z back)
+    ...cornerPath(-1, 1).reverse(), // (+z back) → (-x side)
+    ...cornerPath(-1, -1), // (-x side) → (-z back)
+    ...cornerPath(1, -1).reverse(), // (-z back) → (+x side), closes to the start
   ];
+
   const E = outline.length;
+  // An edge is a back wall edge iff both endpoints sit on z = ±L2.
+  const isBackEdge: boolean[] = [];
+  for (let i = 0; i < E; i++) {
+    const a = outline[i];
+    const b = outline[(i + 1) % E];
+    isBackEdge.push(Math.abs(Math.abs(a[1]) - L2) < 1e-6 && Math.abs(Math.abs(b[1]) - L2) < 1e-6);
+  }
+
   // Inward unit normal of each edge i (from outline[i] to outline[i+1]).
   const normals: P2[] = outline.map((a, i) => {
     const b = outline[(i + 1) % E];
@@ -73,62 +129,71 @@ export function buildArenaGeometry(): ArenaGeometry {
     }
     return [nx, nz];
   });
+  const edgeRamp = (i: number) => (isBackEdge[i] ? rBack : rSide);
+  /** Floor ramp inset of a circular ramp of radius r at height y. */
+  const rampInset = (r: number, y: number) => (y >= r ? 0 : r - Math.sqrt(Math.max(0, r * r - (r - y) * (r - y))));
+  const ceilInset = (y: number) => {
+    const yy = H - y;
+    return yy >= rCeil ? 0 : rCeil - Math.sqrt(Math.max(0, rCeil * rCeil - (rCeil - yy) * (rCeil - yy)));
+  };
+  const edgeInset = (i: number, y: number) => rampInset(edgeRamp(i), y) + ceilInset(y);
 
-  /** Vertex i of the outline inset by distance d: intersection of the two offset edge lines. */
-  const insetVertex = (i: number, d: number): P2 => {
+  /** Vertex i of the outline inset per edge at height y: intersection of the two offset edge lines. */
+  const insetVertex = (i: number, y: number): P2 => {
     const ePrev = (i - 1 + E) % E;
     const [n1x, n1z] = normals[ePrev];
     const [n2x, n2z] = normals[i];
     const a1 = outline[ePrev];
     const a2 = outline[i];
-    const c1 = n1x * a1[0] + n1z * a1[1] + d;
-    const c2 = n2x * a2[0] + n2z * a2[1] + d;
+    const c1 = n1x * a1[0] + n1z * a1[1] + edgeInset(ePrev, y);
+    const c2 = n2x * a2[0] + n2z * a2[1] + edgeInset(i, y);
     const det = n1x * n2z - n1z * n2x;
+    if (Math.abs(det) < 1e-9) {
+      // Collinear neighbours: offset the vertex along the shared normal.
+      return [a2[0] + n2x * edgeInset(i, y), a2[1] + n2z * edgeInset(i, y)];
+    }
     return [(c1 * n2z - c2 * n1z) / det, (n1x * c2 - n2x * c1) / det];
   };
 
-  /**
-   * A ring is the wall outline at one height, as an ordered list of [x, z] points. The two
-   * back-wall edges (index 3 at +Z, index 7 at -Z) are split at the goal posts x = ±gw so the
-   * goal mouth is its own segment.
-   */
-  const ringPoints = (d: number): { pts: P2[]; mouth: boolean[] } => {
+  /** Ring at height y: inset outline, with back-wall edges split at the goal posts. */
+  const ringPoints = (y: number): { pts: P2[]; mouth: boolean[] } => {
     const pts: P2[] = [];
-    const mouth: boolean[] = []; // mouth[j] describes the segment from pts[j] to pts[j+1]
+    const mouth: boolean[] = [];
     for (let i = 0; i < E; i++) {
-      pts.push(insetVertex(i, d));
-      if (i === 3) {
-        const z = L2 - d; // +Z back wall, x decreasing
-        mouth.push(false);
-        pts.push([gw, z]);
-        mouth.push(true);
-        pts.push([-gw, z]);
-        mouth.push(false);
-      } else if (i === 7) {
-        const z = -(L2 - d); // -Z back wall, x increasing
-        mouth.push(false);
-        pts.push([-gw, z]);
-        mouth.push(true);
-        pts.push([gw, z]);
-        mouth.push(false);
-      } else {
-        mouth.push(false);
+      const v = insetVertex(i, y);
+      pts.push(v);
+      if (isBackEdge[i]) {
+        const a = outline[i];
+        const b = outline[(i + 1) % E];
+        const z = Math.sign(a[1]) * (L2 - edgeInset(i, y));
+        // Only the edge that spans the goal mouth gets split.
+        const lo = Math.min(a[0], b[0]);
+        const hi = Math.max(a[0], b[0]);
+        if (lo < -gw + 1e-6 && hi > gw - 1e-6) {
+          const dir = Math.sign(b[0] - a[0]);
+          mouth.push(false);
+          pts.push([-dir * gw, z]);
+          mouth.push(true);
+          pts.push([dir * gw, z]);
+          mouth.push(false);
+          continue;
+        }
       }
+      mouth.push(false);
     }
     return { pts, mouth };
   };
 
-  // Ring heights and insets: floor ramp, goal top, ceiling ramp.
-  const rings: { y: number; d: number }[] = [];
-  for (let k = 0; k <= N; k++) {
-    const th = (k / N) * (Math.PI / 2);
-    rings.push({ y: rF * (1 - Math.cos(th)), d: rF * (1 - Math.sin(th)) });
-  }
-  rings.push({ y: gh, d: 0 });
-  for (let k = 0; k <= N; k++) {
-    const ph = (k / N) * (Math.PI / 2);
-    rings.push({ y: H - rC + rC * Math.sin(ph), d: rC * (1 - Math.cos(ph)) });
-  }
+  // Ring heights: floor ramp samples (dense enough for the 256 ramp), goal top, ceiling curve samples.
+  const rings: number[] = [];
+  const rMax = Math.max(rSide, rBack);
+  for (let k = 0; k <= N; k++) rings.push(rMax * (1 - Math.cos((k / N) * (Math.PI / 2))));
+  if (rBack < rMax) rings.push(rBack);
+  rings.push(gh);
+  const ceilN = TUNING.ceilingSegments;
+  for (let k = 0; k <= ceilN; k++) rings.push(H - rCeil + rCeil * Math.sin((k / ceilN) * (Math.PI / 2)));
+  rings.sort((a, b) => a - b);
+  const uniqueRings = rings.filter((y, i) => i === 0 || y - rings[i - 1] > 1e-6);
 
   const verts: number[] = [];
   const idx: number[] = [];
@@ -139,18 +204,18 @@ export function buildArenaGeometry(): ArenaGeometry {
 
   const ringIdx: number[][] = [];
   let mouthFlags: boolean[] = [];
-  for (const r of rings) {
-    const { pts, mouth } = ringPoints(r.d);
+  for (const y of uniqueRings) {
+    const { pts, mouth } = ringPoints(y);
     mouthFlags = mouth;
-    ringIdx.push(pts.map(([x, z]) => addVert(x, r.y, z)));
+    ringIdx.push(pts.map(([x, z]) => addVert(x, y, z)));
   }
   const S = ringIdx[0].length;
 
   // Wall bands between consecutive rings. Winding gives normals pointing INTO the arena.
-  for (let k = 0; k < rings.length - 1; k++) {
+  for (let k = 0; k < uniqueRings.length - 1; k++) {
     const below = ringIdx[k];
     const above = ringIdx[k + 1];
-    const bandTop = rings[k + 1].y;
+    const bandTop = uniqueRings[k + 1];
     for (let j = 0; j < S; j++) {
       if (mouthFlags[j] && bandTop <= gh + 1e-6) continue; // open goal mouth
       const j1 = (j + 1) % S;
@@ -159,17 +224,14 @@ export function buildArenaGeometry(): ArenaGeometry {
     }
   }
 
-  // Goal post caps: close the open end of each floor ramp at the goal posts.
+  // Goal post caps: close the open end of each back-wall floor ramp at the posts.
+  const rampRings = uniqueRings.filter((y) => y <= rBack + 1e-6);
   for (const s of [-1, 1]) {
     for (const sx of [-1, 1]) {
       const corner = addVert(sx * gw, 0, s * L2);
-      const profile: number[] = [];
-      for (let k = 0; k <= N; k++) {
-        profile.push(addVert(sx * gw, rings[k].y, s * (L2 - rings[k].d)));
-      }
-      // Face the goal mouth (toward the centre line x = 0).
+      const profile = rampRings.map((y) => addVert(sx * gw, y, s * (L2 - rampInset(rBack, y))));
       const inward = -sx;
-      for (let k = 0; k < N; k++) {
+      for (let k = 0; k < profile.length - 1; k++) {
         if (inward > 0) idx.push(corner, profile[k + 1], profile[k]);
         else idx.push(corner, profile[k], profile[k + 1]);
       }
@@ -188,9 +250,10 @@ export function buildArenaGeometry(): ArenaGeometry {
     goalBoxes.push({ hx: gw + t, hy: t / 2, hz: (gd + t) / 2, x: 0, y: gh + t / 2, z: zc }); // roof
   }
 
-  // Backstops sit flush behind each wall plane; the ramps are inset from those planes so they never touch.
+  // Backstops sit flush behind each wall plane; ramps and blends are inset from those planes so they never touch.
   const backstopBoxes: Box[] = [];
   const hy = H / 2 + t;
+  const c = ARENA.cornerCut;
   backstopBoxes.push({ hx: t / 2, hy, hz: L2 - c + t, x: -(W2 + t / 2), y: H / 2, z: 0 });
   backstopBoxes.push({ hx: t / 2, hy, hz: L2 - c + t, x: W2 + t / 2, y: H / 2, z: 0 });
   for (const s of [-1, 1]) {
@@ -198,7 +261,6 @@ export function buildArenaGeometry(): ArenaGeometry {
     const sideHx = (W2 - c + t - gw) / 2;
     backstopBoxes.push({ hx: sideHx, hy, hz: t / 2, x: -(gw + sideHx), y: H / 2, z });
     backstopBoxes.push({ hx: sideHx, hy, hz: t / 2, x: gw + sideHx, y: H / 2, z });
-    // Flush with the crossbar at gh, extending past the ceiling.
     const aboveHy = (H - gh + t) / 2;
     backstopBoxes.push({ hx: gw, hy: aboveHy, hz: t / 2, x: 0, y: gh + aboveHy, z });
   }

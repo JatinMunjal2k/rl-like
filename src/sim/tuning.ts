@@ -58,17 +58,22 @@ export const TUNING = {
   // Arena shape
   // ------------------------------------------------------------------------------
   /**
-   * RL's arena is a hand-modelled collision mesh (RocketSim loads it from the game files, which
-   * we cannot distribute) and nobody publishes its curve radii. Community measurements put the
-   * floor-to-wall ramp at roughly 256 uu and "not perfectly circular", with the wall-to-ceiling
-   * transition starting about 200 uu below the ceiling. We build quarter-circle ramps out of flat
-   * segments, flat 45° corner walls on the verified |x|+|y| = 8064 plane, and a rectangular goal
-   * box with square posts. Unknown and therefore omitted: the blend between corner walls and
-   * side/back walls, and the rounding of the goal posts and crossbar.
+   * RL's arena is a hand-modelled collision mesh that we cannot distribute (RocketSim loads it from
+   * the game files). These radii were MEASURED from that mesh: side-wall floor ramp and corner ramps
+   * are circular r = 256; the back-wall floor ramp is smaller, r = 160; every wall meets the ceiling
+   * with an r = 550 arc; the flat 45° corner wall on |x|+|y| = 8064 blends into the back wall with an
+   * ~800 arc and into the side wall with an ~680 arc. Our analytic mesh reproduces those with flat
+   * facets. Still approximate: the fillet where the goal posts meet the back-wall ramp (~100 uu) and
+   * the goal's own interior corners are square here.
    */
-  rampRadiusFloor: 256 * UU,
-  rampRadiusCeiling: 200 * UU,
-  rampSegments: 12, // 7.5° facets; coarser facets made low bounces depend on which facet the ball hit
+  arenaSideRampRadius: 256 * UU,
+  arenaBackRampRadius: 160 * UU,
+  arenaCeilingRadius: 550 * UU,
+  arenaCornerBlendBack: 800 * UU,
+  arenaCornerBlendSide: 680 * UU,
+  rampSegments: 12, // 7.5° facets on the floor ramps
+  ceilingSegments: 8,
+  cornerBlendSegments: 5,
   wallThickness: 1.0, // m, for the box colliders behind the goal mouths
 
   // ------------------------------------------------------------------------------

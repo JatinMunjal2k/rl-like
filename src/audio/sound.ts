@@ -104,7 +104,7 @@ export class SoundManager {
     this.engineOsc.frequency.setTargetAtTime(targetFreq, t, 0.08);
     this.engineOsc2.frequency.setTargetAtTime(targetFreq * 1.5, t, 0.08);
     this.engineFilter.frequency.setTargetAtTime(350 + 1800 * ratio + 400 * Math.abs(f.throttle), t, 0.1);
-    const engineLevel = (0.035 + 0.075 * Math.abs(f.throttle) + 0.04 * ratio) * (f.grounded ? 1 : 0.7);
+    const engineLevel = (0.012 + 0.03 * Math.abs(f.throttle) + 0.018 * ratio) * (f.grounded ? 1 : 0.7);
     this.engineGain.gain.setTargetAtTime(engineLevel, t, 0.08);
 
     // Boost roar.

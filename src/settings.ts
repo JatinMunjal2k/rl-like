@@ -32,8 +32,9 @@ export interface Settings {
   };
 }
 
+/** Defaults follow the most common pro camera: FOV 110, distance 270, height 100, angle -3, stiffness 0.45. */
 export const DEFAULT_SETTINGS: Settings = {
-  camera: { fov: 110, distance: 270, height: 110, angle: -3, stiffness: 0.5 },
+  camera: { fov: 110, distance: 270, height: 100, angle: -3, stiffness: 0.45 },
   controls: { steeringSensitivity: 1.0, aerialSensitivity: 1.0, deadzone: 0.2, dodgeDeadzone: 0.5 },
   audio: { volume: 0.6 },
 };

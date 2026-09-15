@@ -68,7 +68,7 @@ The car follows RocketSim's reverse-engineered vehicle:
 - RocketSim's "extra pushback" when a wheel ray sinks into geometry is omitted; Rapier's hitbox collision covers it.
 - Autoroll torque is a proportional alignment instead of RL's torque through the inertia tensor.
 - Car-ball restitution ends at 0.18 (RL 0.0); friction is exact (2.0).
-- Arena ramps are quarter circles of 256 uu (floor) and 200 uu (ceiling) built from flat segments; RL's mesh is hand-modelled and not distributable. Unknown and omitted: the blend between corner walls and side/back walls, rounded goal posts and crossbar.
+- Arena shape is fitted to measurements of RL's real collision mesh (parsed from RocketSim `.cmf` files, not redistributed): side-wall and corner floor ramps r = 256 uu, back-wall floor ramps r = 160, wall-to-ceiling arcs r = 550, corner walls on |x|+|y| = 8064 blended into the back wall (r ≈ 800) and side wall (r ≈ 680). Built from flat facets. Still square: the goal's interior corners and the ~100 uu fillet where posts meet the back-wall ramp.
 
 ## Visuals and sound
 
@@ -79,7 +79,9 @@ The car follows RocketSim's reverse-engineered vehicle:
 
 ## Settings
 
-Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges and defaults) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone). The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
+Settings → Controls (bindings), Camera (FOV, distance, height, angle, stiffness with RL's ranges; defaults are the common pro setup 110 / 270 / 100 / -3 / 0.45) and Gameplay (steering sensitivity, aerial sensitivity, controller deadzone, dodge deadzone, sound volume). Every slider has a description. The menu works with mouse, keyboard (arrows, Enter, Backspace) and gamepad (D-pad or stick, A, B). Everything persists in the browser.
+
+Ball cam places the camera on the 3D line from the ball through the car, so a high ball pushes the camera down toward the floor (clamped) and the car stays in the lower part of the frame. Car cam looks level along the car's heading, tilted by the angle setting. Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
 
 ## Match flow and HUD
 

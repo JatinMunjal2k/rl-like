@@ -1,21 +1,27 @@
 import * as THREE from 'three';
-import { ARENA, BALL, BOOST_PADS, OCTANE, UU } from '../sim/rl';
+import { ARENA, BALL, BOOST_PADS, CAR, OCTANE, UU, curve } from '../sim/rl';
 import { HITBOX_HALF, HITBOX_OFFSET } from '../sim/car';
 import type { ArenaGeometry } from '../sim/arena';
 import type { BodyState, BoostPad } from '../sim/game';
+import type { Team } from '../sim/car';
+import type { CarRenderState } from '../net/session';
 
 const pA = new THREE.Vector3();
 const pB = new THREE.Vector3();
 const qA = new THREE.Quaternion();
 const qB = new THREE.Quaternion();
 
-export interface CarVisualState {
-  /** Front wheel steer angle in radians, positive = right. */
-  steerAngle: number;
-  /** Forward speed in m/s, for wheel spin. */
-  forwardSpeed: number;
-  boosting: boolean;
-  supersonic: boolean;
+const TEAM_PAINT: Record<Team, number> = { blue: 0x1f63d8, orange: 0xf07f1a };
+
+/** One car's meshes: body group, steerable wheels, boost flame, optional nameplate. */
+interface CarVisual {
+  group: THREE.Group;
+  team: Team;
+  wheels: { pivot: THREE.Group; mesh: THREE.Mesh; radius: number; front: boolean }[];
+  flame: THREE.Mesh;
+  flameMaterial: THREE.MeshBasicMaterial;
+  nameplate: THREE.Sprite | null;
+  name: string;
 }
 
 /**
@@ -26,11 +32,8 @@ export class Renderer {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
   readonly gl: THREE.WebGLRenderer;
-  readonly carGroup = new THREE.Group();
   readonly ballMesh: THREE.Mesh;
-  private readonly boostFlame: THREE.Mesh;
-  private readonly flameMaterial: THREE.MeshBasicMaterial;
-  private readonly wheels: { pivot: THREE.Group; mesh: THREE.Mesh; radius: number; front: boolean }[] = [];
+  private readonly cars = new Map<number, CarVisual>();
   private padMeshes: THREE.Mesh[] = [];
   private readonly padActiveBig = new THREE.MeshBasicMaterial({ color: 0xffb347 });
   private readonly padActiveSmall = new THREE.MeshBasicMaterial({ color: 0xffd98a });
@@ -56,8 +59,6 @@ export class Renderer {
 
     this.buildArena(arena);
     this.buildPads(pads);
-    this.boostFlame = this.buildCar();
-    this.flameMaterial = this.boostFlame.material as THREE.MeshBasicMaterial;
     this.ballMesh = this.buildBall();
 
     window.addEventListener('resize', () => this.resize(container));
@@ -71,21 +72,61 @@ export class Renderer {
     this.camera.updateProjectionMatrix();
   }
 
-  sync(prevCar: BodyState, currCar: BodyState, prevBall: BodyState, currBall: BodyState, alpha: number, ballVisible: boolean): void {
-    applyInterpolated(this.carGroup, prevCar, currCar, alpha);
-    applyInterpolated(this.ballMesh, prevBall, currBall, alpha);
-    this.ballMesh.visible = ballVisible;
+  /** The Object3D the camera follows, once that car exists. */
+  carObject(id: number): THREE.Object3D | null {
+    return this.cars.get(id)?.group ?? null;
   }
 
-  /** Wheel spin, steering, flame. Call once per frame after sync(). */
-  syncCar(state: CarVisualState, dt: number): void {
-    for (const w of this.wheels) {
-      w.mesh.rotation.x -= (state.forwardSpeed / w.radius) * dt;
-      if (w.front) w.pivot.rotation.y = -state.steerAngle;
+  /** Create, update and remove car visuals to match `states`. Call once per frame. */
+  syncCars(states: CarRenderState[], localId: number, dt: number): void {
+    const seen = new Set<number>();
+    for (const s of states) {
+      seen.add(s.id);
+      let v = this.cars.get(s.id);
+      if (v && v.team !== s.team) {
+        this.removeCar(s.id);
+        v = undefined;
+      }
+      if (!v) {
+        v = this.buildCar(s.team);
+        this.cars.set(s.id, v);
+      }
+      const showName = s.id !== localId && s.name.length > 0;
+      if (showName && v.name !== s.name) {
+        if (v.nameplate) v.group.remove(v.nameplate);
+        v.nameplate = makeNameplate(s.name, s.team);
+        v.group.add(v.nameplate);
+        v.name = s.name;
+      } else if (!showName && v.nameplate) {
+        v.group.remove(v.nameplate);
+        v.nameplate = null;
+        v.name = '';
+      }
+      applyInterpolated(v.group, s.prev, s.curr, s.alpha);
+      if (s.offsetPos) v.group.position.add(s.offsetPos);
+      if (s.offsetQuat) v.group.quaternion.premultiply(s.offsetQuat);
+      for (const w of v.wheels) {
+        w.mesh.rotation.x -= (s.forwardSpeed / w.radius) * dt;
+        if (w.front) w.pivot.rotation.y = -s.steer * steerAngleFor(s.forwardSpeed);
+      }
+      v.flame.visible = s.boosting;
+      v.flameMaterial.color.setHex(s.supersonic ? 0xfff3d6 : 0xffa62b);
+      v.flame.scale.setScalar(s.supersonic ? 1.5 : 1);
     }
-    this.boostFlame.visible = state.boosting;
-    this.flameMaterial.color.setHex(state.supersonic ? 0xfff3d6 : 0xffa62b);
-    this.boostFlame.scale.setScalar(state.supersonic ? 1.5 : 1);
+    for (const id of [...this.cars.keys()]) if (!seen.has(id)) this.removeCar(id);
+  }
+
+  removeCar(id: number): void {
+    const v = this.cars.get(id);
+    if (!v) return;
+    this.scene.remove(v.group);
+    this.cars.delete(id);
+  }
+
+  syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null): void {
+    applyInterpolated(this.ballMesh, prev, curr, alpha);
+    if (offset) this.ballMesh.position.add(offset);
+    this.ballMesh.visible = visible;
   }
 
   syncPads(pads: BoostPad[]): void {
@@ -195,16 +236,17 @@ export class Renderer {
   // Car: a Fennec-style body on the Octane hitbox, with wheels at RL's positions
   // ---------------------------------------------------------------------------
 
-  private buildCar(): THREE.Mesh {
+  private buildCar(team: Team): CarVisual {
+    const group = new THREE.Group();
     const body = new THREE.Group();
     body.position.copy(HITBOX_OFFSET);
-    this.carGroup.add(body);
+    group.add(body);
 
     const w = HITBOX_HALF.x * 2; // width 0.867
     const h = HITBOX_HALF.y * 2; // height 0.387
     const l = HITBOX_HALF.z * 2; // length 1.205
 
-    const paint = new THREE.MeshLambertMaterial({ color: 0x1f63d8 });
+    const paint = new THREE.MeshLambertMaterial({ color: TEAM_PAINT[team] });
     const trim = new THREE.MeshLambertMaterial({ color: 0x151a22 });
     const glass = new THREE.MeshLambertMaterial({ color: 0x0c1526 });
     const light = new THREE.MeshBasicMaterial({ color: 0xfff1b8 });
@@ -240,6 +282,7 @@ export class Renderer {
       { x: -OCTANE.rearWheelOffset.y, z: -OCTANE.rearWheelOffset.x, r: OCTANE.rearWheelRadius, front: false },
     ];
     const width = 0.19;
+    const wheels: CarVisual['wheels'] = [];
     for (const d of wheelDefs) {
       const pivot = new THREE.Group();
       pivot.position.set(d.x + Math.sign(d.x) * 0.04, d.r - OCTANE.restZ, d.z);
@@ -250,18 +293,19 @@ export class Renderer {
       rimGeo.rotateZ(Math.PI / 2);
       mesh.add(new THREE.Mesh(rimGeo, rim));
       pivot.add(mesh);
-      this.carGroup.add(pivot);
-      this.wheels.push({ pivot, mesh, radius: d.r, front: d.front });
+      group.add(pivot);
+      wheels.push({ pivot, mesh, radius: d.r, front: d.front });
     }
 
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.9, 8), new THREE.MeshBasicMaterial({ color: 0xffa62b }));
+    const flameMaterial = new THREE.MeshBasicMaterial({ color: 0xffa62b });
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.9, 8), flameMaterial);
     flame.rotation.x = Math.PI / 2; // tip points +Z (rear)
     flame.position.set(0, -h * 0.1, l / 2 + 0.45);
     flame.visible = false;
     body.add(flame);
 
-    this.scene.add(this.carGroup);
-    return flame;
+    this.scene.add(group);
+    return { group, team, wheels, flame, flameMaterial, nameplate: null, name: '' };
   }
 
   private buildBall(): THREE.Mesh {
@@ -278,6 +322,33 @@ function applyInterpolated(obj: THREE.Object3D, a: BodyState, b: BodyState, alph
   qA.set(a.qx, a.qy, a.qz, a.qw);
   qB.set(b.qx, b.qy, b.qz, b.qw);
   obj.quaternion.copy(qA).slerp(qB, alpha);
+}
+
+/** Front-wheel steer angle at full lock for a given forward speed (RL's steer curve). */
+function steerAngleFor(forwardSpeed: number): number {
+  return curve(CAR.steerAngleFromSpeedCurve, Math.abs(forwardSpeed) / UU);
+}
+
+/** Name floating above another player's car. Canvas text on a sprite, built once per name. */
+function makeNameplate(name: string, team: Team): THREE.Sprite {
+  const cv = document.createElement('canvas');
+  cv.width = 256;
+  cv.height = 64;
+  const ctx = cv.getContext('2d')!;
+  ctx.font = 'bold 34px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+  ctx.strokeText(name, 128, 32, 240);
+  ctx.fillStyle = team === 'blue' ? '#8fc1ff' : '#ffc08a';
+  ctx.fillText(name, 128, 32, 240);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sprite.scale.set(2.4, 0.6, 1);
+  sprite.position.set(0, 1.1, 0);
+  return sprite;
 }
 
 /** Static field texture: turf stripes, RL-style markings, boost pad rings. Drawn once, in the plane's metres. */

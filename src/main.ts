@@ -1,20 +1,29 @@
-import { Game } from './sim/game';
-import { CAR, TICK_DT, UU, curve } from './sim/rl';
+import { CAR, UU } from './sim/rl';
+import { buildArenaGeometry } from './sim/arena';
+import { FREE_PLAY_CONFIG, Game, type Team } from './sim/game';
 import { Renderer } from './render/renderer';
 import { FollowCamera } from './render/camera';
 import { InputManager } from './input/input';
-import { Menu } from './ui/menu';
+import { EMPTY_INPUT } from './input/types';
+import { MATCH_LENGTHS, Menu, type MenuContext } from './ui/menu';
 import { SoundManager } from './audio/sound';
 import { loadSettings, saveSettings } from './settings';
+import { LocalSession, type Session } from './net/session';
+import { HostSession } from './net/host';
+import { ClientSession } from './net/client';
+import { describeError } from './net/transport';
 
 const app = document.getElementById('app')!;
 const hudEl = document.getElementById('hud')!;
 const scoreEl = document.getElementById('score')!;
+const clockEl = document.getElementById('clock')!;
 const bannerEl = document.getElementById('banner')!;
-const bannerTitleEl = bannerEl.querySelector('.title')!;
-const bannerSpeedEl = bannerEl.querySelector('.goalSpeed')!;
+const bannerTitleEl = bannerEl.querySelector('.title') as HTMLElement;
+const bannerSpeedEl = bannerEl.querySelector('.goalSpeed') as HTMLElement;
+const bannerSubEl = bannerEl.querySelector('.sub') as HTMLElement;
 const fpsEl = document.getElementById('fps')!;
 const camModeEl = document.getElementById('camMode')!;
+const pingEl = document.getElementById('ping')!;
 const controllerEl = document.getElementById('controller')!;
 const speedEl = document.getElementById('speed')!;
 const speedValueEl = speedEl.querySelector('.value')!;
@@ -27,6 +36,7 @@ boostFillEl.style.strokeDasharray = `${GAUGE_CIRCUMFERENCE}`;
 const UU_S_TO_KMH = 0.036;
 /** Speed readout goes red only at the hard cap (within 10 uu/s of 2300, shown in km/h). */
 const MAX_SPEED_KMH = (CAR.maxSpeed / UU - 10) * UU_S_TO_KMH;
+const TEAM_COLOR: Record<Team, string> = { blue: '#4aa3ff', orange: '#ff9a3c' };
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
@@ -43,27 +53,44 @@ function setCamMode(ballCam: boolean): void {
   camModeEl.classList.toggle('on', ballCam);
 }
 
+function formatClock(seconds: number): string {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
 async function main(): Promise<void> {
   const settings = loadSettings();
-  const game = await Game.create();
-  const renderer = new Renderer(app, game.arena, game.pads);
+  // The arena is static: build its geometry once for the renderer, independent of any game.
+  const arenaGeometry = buildArenaGeometry();
+  const probe = await Game.create(FREE_PLAY_CONFIG); // also initialises the physics engine
+  const renderer = new Renderer(app, arenaGeometry, probe.pads);
+  probe.destroy();
   const followCam = new FollowCamera(settings);
   const input = new InputManager(settings);
   const menu = new Menu(document.body, input, settings);
   const sound = new SoundManager();
 
-  // Debug handle for the browser console.
-  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__game = game;
-  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__input = input;
-  (window as unknown as { __game: Game; __input: InputManager; __menu: Menu }).__menu = menu;
-  (window as unknown as { __renderer: Renderer; __camera: FollowCamera }).__renderer = renderer;
-  (window as unknown as { __renderer: Renderer; __camera: FollowCamera }).__camera = followCam;
+  let session: Session | null = null;
+
+  // Debug handles for the browser console.
+  const dbg = window as unknown as Record<string, unknown>;
+  dbg.__input = input;
+  dbg.__menu = menu;
+  dbg.__renderer = renderer;
+  dbg.__camera = followCam;
+  Object.defineProperty(dbg, '__session', { get: () => session, configurable: true });
+  Object.defineProperty(dbg, '__game', { get: () => session?.game ?? null, configurable: true });
 
   const applySettings = () => {
     saveSettings(settings);
     followCam.applyProjection(renderer.camera);
-    game.car.dodgeDeadzone = settings.controls.dodgeDeadzone;
     sound.setVolume(settings.audio.volume);
+    const localCar = session?.game?.cars.get(session.localId);
+    if (localCar) localCar.dodgeDeadzone = settings.controls.dodgeDeadzone;
+    if (session instanceof HostSession) {
+      session.hostDodgeDeadzone = settings.controls.dodgeDeadzone;
+      session.game?.setDodgeDeadzone(0, settings.controls.dodgeDeadzone);
+    }
   };
   applySettings();
   window.addEventListener('resize', () => followCam.applyProjection(renderer.camera));
@@ -73,38 +100,196 @@ async function main(): Promise<void> {
     controllerName = name;
     setController(name);
   };
-  menu.onSettingsChanged = applySettings;
-  menu.onPlay = () => {
-    last = performance.now();
-    accumulator = 0;
-    input.blockJumpUntilRelease();
-    sound.start(); // user gesture: safe to create the AudioContext
-  };
   setController(null);
   setCamMode(followCam.ballCam);
+
+  // --- Session management --------------------------------------------------------
+
+  const menuContext = (): MenuContext => {
+    if (!session) return { kind: 'none' };
+    if (session.kind === 'local') return { kind: 'local' };
+    return { kind: session.kind, inMatch: !!session.lobby?.inMatch };
+  };
+  const refreshMenu = () => {
+    menu.setContext(menuContext());
+    menu.setLobby(session?.lobby ?? null);
+  };
+
+  const attach = (s: Session) => {
+    session = s;
+    s.onLobbyChanged = refreshMenu;
+    s.onMatchStarted = () => {
+      refreshMenu();
+      resetFrameTimers();
+      menu.play();
+    };
+    s.onEnded = (reason) => {
+      if (session === s) session = null;
+      renderer.syncCars([], -1, 0);
+      refreshMenu();
+      menu.setMultiplayerStatus(reason);
+      menu.show('multiplayer');
+    };
+    refreshMenu();
+    applySettings();
+  };
+
+  const endSession = () => {
+    const s = session;
+    session = null;
+    if (s) {
+      s.onEnded = null;
+      s.leave();
+    }
+    renderer.syncCars([], -1, 0);
+    refreshMenu();
+  };
+
+  menu.onFreePlay = async () => {
+    endSession();
+    attach(await LocalSession.create());
+    resetFrameTimers();
+    menu.play();
+  };
+  menu.onQuit = () => {
+    endSession();
+    menu.show('main');
+  };
+  menu.onHost = async (name) => {
+    endSession();
+    menu.setMultiplayerStatus('Creating room…', true);
+    try {
+      const host = await HostSession.create(name);
+      host.hostDodgeDeadzone = settings.controls.dodgeDeadzone;
+      attach(host);
+      menu.setMultiplayerStatus('');
+      menu.show('lobby');
+    } catch (err) {
+      menu.setMultiplayerStatus(`Could not create a room: ${describeError(err)}`);
+    }
+  };
+  menu.onJoin = async (name, code) => {
+    endSession();
+    menu.setMultiplayerStatus(`Joining ${code}…`, true);
+    try {
+      const client = await ClientSession.create(code, name, settings.controls.dodgeDeadzone);
+      attach(client);
+      menu.setMultiplayerStatus('');
+      menu.show('lobby');
+    } catch (err) {
+      menu.setMultiplayerStatus(`Could not join: ${describeError(err)}`);
+    }
+  };
+  menu.onLeaveRoom = () => {
+    endSession();
+    menu.setMultiplayerStatus('');
+    menu.show('multiplayer');
+  };
+  menu.onSwitchTeam = () => {
+    if (session instanceof HostSession) session.setHostTeam(session.hostTeam === 'blue' ? 'orange' : 'blue');
+    else if (session instanceof ClientSession) {
+      const me = session.lobby.players.find((p) => p.slot === session!.localId);
+      session.requestTeam(me?.team === 'blue' ? 'orange' : 'blue');
+    }
+  };
+  menu.onCycleMatchLength = () => {
+    if (!(session instanceof HostSession)) return;
+    const i = MATCH_LENGTHS.indexOf(session.settings.matchSeconds);
+    session.setSettings({ matchSeconds: MATCH_LENGTHS[(i + 1) % MATCH_LENGTHS.length] });
+  };
+  menu.onStartMatch = () => {
+    if (session instanceof HostSession) void session.startMatch();
+  };
+  menu.onEndMatch = () => {
+    if (session instanceof HostSession) {
+      session.endMatch();
+      refreshMenu();
+      menu.show('lobby');
+    }
+  };
+  menu.onSettingsChanged = applySettings;
+  menu.onPlay = () => {
+    resetFrameTimers();
+    input.blockJumpUntilRelease();
+    sound.start(); // user gesture: safe to create the AudioContext
+    if (session instanceof LocalSession) session.resume();
+  };
+
+  // --- Background ticking ----------------------------------------------------------
+  // A hidden tab gets requestAnimationFrame and timers throttled to about once a second, which
+  // would freeze a hosted match for everyone. Worker timers are not throttled, so a tiny worker
+  // pings the page every few milliseconds and, whenever the frame loop has not run for a while
+  // (hidden tab, minimised window, or any other stall), the network session is advanced from
+  // those pings instead (no rendering).
+  let lastBackgroundTick = performance.now();
+  let lastFrameAt = performance.now();
+  try {
+    const src = 'setInterval(() => postMessage(0), 4);';
+    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    worker.onmessage = () => {
+      if (!session || session.kind === 'local') return;
+      const now = performance.now();
+      if (!document.hidden && now - lastFrameAt < 50) return; // the frame loop is doing its job
+      const dt = Math.min((now - lastBackgroundTick) / 1000, 0.1);
+      lastBackgroundTick = now;
+      session.update(EMPTY_INPUT, dt, true);
+      last = now; // the frame loop resumes from here when the tab is shown again
+    };
+  } catch {
+    /* no worker: the tab must stay visible to host */
+  }
+  document.addEventListener('visibilitychange', () => {
+    lastBackgroundTick = performance.now();
+    last = performance.now();
+  });
+
+  // --- Frame loop ------------------------------------------------------------------
 
   let lastScore = '';
   let bannerUntil = 0;
   let last = performance.now();
-  let accumulator = 0;
   let fpsFrames = 0;
   let fpsWindowStart = performance.now();
-  let lastSpeedUU = -1;
+  let lastSpeedKmh = -1;
   let lastBoost = -1;
   let lastBoostState = '';
+  let lastClock = '';
+  let lastPingText = '';
   let ballCamBeforeGoal = followCam.ballCam;
   let wasInGoalPause = false;
+  let lastPhase = '';
+  let lastCountdownNumber = -1;
   // Sound event tracking (frame-level edges).
   let prevJumping = false;
   let prevGrounded = true;
   let airTime = 0;
   let prevWorldContact = false;
-  let prevPadCooldowns = game.pads.map((p) => p.cooldown);
+  let prevPadCooldowns: number[] = [];
   let prevScoreTotal = 0;
+
+  const resetFrameTimers = () => {
+    last = performance.now();
+  };
+
+  const showBanner = (title: string, speed: string, sub: string, color: string, ms: number) => {
+    bannerTitleEl.textContent = title;
+    bannerSpeedEl.textContent = speed;
+    bannerSubEl.textContent = sub;
+    bannerEl.style.color = color;
+    bannerEl.style.display = 'block';
+    bannerEl.classList.remove('countdown');
+    bannerUntil = ms > 0 ? performance.now() + ms : Infinity;
+  };
+  const hideBanner = () => {
+    bannerEl.style.display = 'none';
+    bannerEl.classList.remove('countdown');
+    bannerUntil = 0;
+  };
 
   const frame = (now: number): void => {
     const frameDt = Math.min((now - last) / 1000, 0.1);
     last = now;
+    lastFrameAt = now;
 
     const fi = input.poll();
     if (fi.controllerName !== controllerName) {
@@ -112,26 +297,30 @@ async function main(): Promise<void> {
       setController(controllerName);
     }
     if (fi.menuPressed) menu.toggle();
+    if (menu.open) menu.navigate(fi.nav, frameDt);
 
-    if (menu.open) {
-      // Menu: black screen, no simulation, no rendering.
-      menu.navigate(fi.nav, frameDt);
+    // Networked sessions keep running behind the menu; free play pauses.
+    session?.update(menu.open ? EMPTY_INPUT : fi.car, frameDt, menu.open);
+
+    const game = session?.game ?? null;
+    const localCar = game?.cars.get(session!.localId) ?? null;
+    if (menu.open || !session || !game || !localCar) {
       hudEl.hidden = true;
       requestAnimationFrame(frame);
       return;
     }
     hudEl.hidden = false;
+    const s = session;
 
-    accumulator += frameDt;
-    if (fi.resetPressed) game.resetMatch();
+    if (fi.resetPressed) s.resetMatch();
     if (fi.toggleCameraPressed) {
       followCam.toggle();
       setCamMode(followCam.ballCam);
-      if (game.goalPause > 0) ballCamBeforeGoal = followCam.ballCam; // user's choice during the pause sticks
+      if (game.phase === 'goal') ballCamBeforeGoal = followCam.ballCam; // user's choice during the pause sticks
     }
 
     // Goal: no ball to look at, so car cam until kickoff, then back to what the player had.
-    const inGoalPause = game.goalPause > 0;
+    const inGoalPause = game.phase === 'goal';
     if (inGoalPause && !wasInGoalPause) {
       ballCamBeforeGoal = followCam.ballCam;
       followCam.ballCam = false;
@@ -142,44 +331,41 @@ async function main(): Promise<void> {
     }
     wasInGoalPause = inGoalPause;
 
-    // Fixed-step simulation; render interpolates between the last two ticks.
-    let steps = 0;
-    while (accumulator >= TICK_DT && steps < 12) {
-      game.step(fi.car, TICK_DT);
-      accumulator -= TICK_DT;
-      steps++;
-    }
-    if (steps === 12) accumulator = 0; // Tab was hidden or the machine stalled; drop the backlog.
-    const alpha = Math.min(1, accumulator / TICK_DT);
-
-    renderer.sync(game.prev.car, game.curr.car, game.prev.ball, game.curr.ball, alpha, game.ballVisible);
+    // --- Render ----------------------------------------------------------------------
+    const carStates = s.carRenderStates();
+    renderer.syncCars(carStates, s.localId, frameDt);
+    renderer.syncBall(game.prev.ball, game.curr.ball, s.alpha, game.ballVisible, s.ballOffset());
     renderer.syncPads(game.pads);
+    const carObj = renderer.carObject(s.localId);
+    if (carObj) {
+      const q = carObj.quaternion;
+      const upY = 1 - 2 * (q.x * q.x + q.z * q.z);
+      followCam.update(renderer.camera, carObj, renderer.ballMesh, { holdHeading: localCar.isFlipping || Math.abs(upY) < 0.35 }, frameDt);
+      renderer.render();
+    }
 
-    // Car visuals: wheel spin from forward speed, front wheels steered by RL's steer curve.
-    const lvNow = game.car.body.linvel();
-    const cq = renderer.carGroup.quaternion;
-    const fwdX = -(2 * (cq.x * cq.z + cq.w * cq.y));
-    const fwdZ = -(1 - 2 * (cq.x * cq.x + cq.y * cq.y));
-    const forwardSpeed = lvNow.x * fwdX + lvNow.z * fwdZ;
-    const steerAngle = fi.car.steer * curve(CAR.steerAngleFromSpeedCurve, Math.abs(forwardSpeed) / UU);
-    renderer.syncCar({ steerAngle, forwardSpeed, boosting: game.car.boosting, supersonic: game.car.supersonic }, frameDt);
-
-    // Sound events from state edges.
-    const grounded = game.car.grounded;
-    const jumped = game.car.isJumping && !prevJumping;
+    // --- Sound events from state edges -------------------------------------------------
+    const lvNow = localCar.body.linvel();
+    const grounded = localCar.grounded;
+    const jumped = localCar.isJumping && !prevJumping;
     const landed = grounded && !prevGrounded && airTime > 0.25;
     airTime = grounded ? 0 : airTime + frameDt;
     let padCollected: 0 | 1 | 2 = 0;
+    if (prevPadCooldowns.length !== game.pads.length) prevPadCooldowns = game.pads.map((p) => p.cooldown);
     for (let i = 0; i < game.pads.length; i++) {
-      if (prevPadCooldowns[i] === 0 && game.pads[i].cooldown > 0) padCollected = game.pads[i].big ? 2 : 1;
+      // Only pads near the local car ring for it (others' pickups are silent).
+      if (prevPadCooldowns[i] === 0 && game.pads[i].cooldown > 0) {
+        const t = localCar.body.translation();
+        if (Math.hypot(t.x - game.pads[i].x, t.z - game.pads[i].z) < 3) padCollected = game.pads[i].big ? 2 : 1;
+      }
       prevPadCooldowns[i] = game.pads[i].cooldown;
     }
     const scoreTotal = game.score.blue + game.score.orange;
-    const wallHit = game.car.worldContact && !prevWorldContact ? Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU : 0;
+    const wallHit = localCar.worldContact && !prevWorldContact ? Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU : 0;
     sound.update({
       speedUU: Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU,
       throttle: fi.car.throttle,
-      boosting: game.car.boosting,
+      boosting: localCar.boosting,
       grounded,
       jumped,
       landed,
@@ -189,31 +375,26 @@ async function main(): Promise<void> {
       goal: scoreTotal > prevScoreTotal,
       wallHitSpeedUU: wallHit,
     });
-    prevJumping = game.car.isJumping;
+    prevJumping = localCar.isJumping;
     prevGrounded = grounded;
-    prevWorldContact = game.car.worldContact;
+    prevWorldContact = localCar.worldContact;
     prevScoreTotal = scoreTotal;
-    const q = renderer.carGroup.quaternion;
-    const upY = 1 - 2 * (q.x * q.x + q.z * q.z);
-    followCam.update(renderer.camera, renderer.carGroup, renderer.ballMesh, { holdHeading: game.car.isFlipping || Math.abs(upY) < 0.35 }, frameDt);
-    renderer.render();
 
-    // --- HUD ---------------------------------------------------------------------
-    const lv = game.car.body.linvel();
-    const speedKmh = Math.round((Math.hypot(lv.x, lv.y, lv.z) / UU) * UU_S_TO_KMH);
-    if (speedKmh !== lastSpeedUU) {
-      lastSpeedUU = speedKmh;
+    // --- HUD ---------------------------------------------------------------------------
+    const speedKmh = Math.round((Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU) * UU_S_TO_KMH);
+    if (speedKmh !== lastSpeedKmh) {
+      lastSpeedKmh = speedKmh;
       speedValueEl.textContent = String(speedKmh);
       speedEl.classList.toggle('max', speedKmh >= MAX_SPEED_KMH);
     }
 
-    const boost = Math.round(game.car.boost);
+    const boost = Math.round(localCar.boost);
     if (boost !== lastBoost) {
       lastBoost = boost;
       boostValueEl.textContent = String(boost);
       boostFillEl.style.strokeDashoffset = `${GAUGE_CIRCUMFERENCE * (1 - boost / CAR.boostMax)}`;
     }
-    const boostState = game.car.boosting ? 'boosting' : boost === 0 ? 'empty' : '';
+    const boostState = localCar.boosting ? 'boosting' : boost === 0 ? 'empty' : '';
     if (boostState !== lastBoostState) {
       lastBoostState = boostState;
       boostFillEl.setAttribute('class', `fill ${boostState}`);
@@ -226,23 +407,64 @@ async function main(): Promise<void> {
       fpsWindowStart = now;
     }
 
+    // Clock.
+    let clockText = '';
+    if (game.config.matchSeconds > 0) clockText = game.overtime ? `+${formatClock(game.overtimeElapsed)}` : formatClock(game.timeRemaining);
+    if (clockText !== lastClock) {
+      lastClock = clockText;
+      clockEl.hidden = clockText === '';
+      clockEl.textContent = clockText;
+      clockEl.classList.toggle('overtime', game.overtime);
+    }
+
+    // Ping.
+    const pingText = s.ping === null ? '' : `PING ${Math.round(s.ping)} ms`;
+    if (pingText !== lastPingText) {
+      lastPingText = pingText;
+      pingEl.hidden = pingText === '';
+      pingEl.textContent = pingText;
+      pingEl.classList.toggle('bad', s.ping !== null && s.ping > 150);
+    }
+
+    // Score and goal banner.
     const scoreText = `${game.score.blue}-${game.score.orange}`;
     if (scoreText !== lastScore) {
       lastScore = scoreText;
       scoreEl.innerHTML = `<span class="blue">BLUE ${game.score.blue}</span> &nbsp;–&nbsp; <span class="orange">${game.score.orange} ORANGE</span>`;
-      if (game.lastGoal) {
-        const uu = game.lastGoalSpeed / UU;
-        bannerTitleEl.textContent = game.lastGoal === 'blue' ? 'GOAL!' : 'OWN GOAL';
-        bannerSpeedEl.textContent = `${Math.round(uu * UU_S_TO_KMH)} km/h`;
-        bannerEl.style.color = game.lastGoal === 'blue' ? '#4aa3ff' : '#ff9a3c';
-        bannerEl.style.display = 'block';
-        bannerUntil = now + 2500;
+      if (game.lastGoal && scoreTotal > 0) {
+        const kmh = Math.round((game.lastGoalSpeed / UU) * UU_S_TO_KMH);
+        const mine = game.lastGoalScorer === s.localId;
+        const scorer = carStates.find((c) => c.id === game.lastGoalScorer)?.name ?? '';
+        const ownGoal = game.lastGoalScorer >= 0 && carStates.find((c) => c.id === game.lastGoalScorer)?.team !== game.lastGoal;
+        const title = mine ? (ownGoal ? 'OWN GOAL' : 'GOAL!') : `${game.lastGoal.toUpperCase()} SCORES`;
+        const sub = !mine && scorer ? (ownGoal ? `${scorer} (own goal)` : scorer) : '';
+        showBanner(title, `${kmh} km/h`, sub, TEAM_COLOR[game.lastGoal], 2500);
       }
     }
-    if (bannerUntil && now > bannerUntil) {
-      bannerEl.style.display = 'none';
-      bannerUntil = 0;
+
+    // Kickoff countdown and match end.
+    if (game.phase === 'countdown') {
+      const n = Math.ceil(game.countdown);
+      if (n !== lastCountdownNumber) {
+        lastCountdownNumber = n;
+        showBanner(String(n), '', '', '#ffffff', 0);
+        bannerEl.classList.add('countdown');
+      }
+    } else if (lastPhase === 'countdown') {
+      lastCountdownNumber = -1;
+      showBanner('GO!', '', '', '#7CFC9A', 700);
+      bannerEl.classList.add('countdown');
+    } else if (game.phase === 'over' && lastPhase !== 'over') {
+      const winner: Team | null = game.score.blue === game.score.orange ? null : game.score.blue > game.score.orange ? 'blue' : 'orange';
+      const myTeam = localCar.team;
+      const title = winner === null ? 'DRAW' : winner === myTeam ? 'VICTORY' : 'DEFEAT';
+      const sub = s.kind === 'host' ? 'Open the menu to return to the lobby' : winner ? `${winner.toUpperCase()} wins` : '';
+      showBanner(title, `${game.score.blue} – ${game.score.orange}`, sub, winner ? TEAM_COLOR[winner] : '#ffffff', 0);
+    } else if (game.phase !== 'over' && lastPhase === 'over') {
+      hideBanner();
     }
+    lastPhase = game.phase;
+    if (bannerUntil && now > bannerUntil) hideBanner();
 
     requestAnimationFrame(frame);
   };

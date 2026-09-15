@@ -143,6 +143,7 @@ export class InputManager {
 
   constructor(private readonly settings: Settings) {
     window.addEventListener('keydown', (e) => {
+      if (isTextField(e.target)) return; // typing a name or room code
       if (this.capture) {
         e.preventDefault();
         if (e.code !== 'Escape') this.finishCapture({ kind: 'key', code: e.code });
@@ -247,6 +248,7 @@ export class InputManager {
       this.prevButtons = now;
     }
 
+    if (isTextField(document.activeElement)) this.keys.clear();
     const kb = this.readKeyboard();
     const pad = gp ? this.readGamepad(gp) : null;
     const car: CarInput = this.capture ? zeroed() : pad && isActive(pad) ? pad : kb;
@@ -258,7 +260,8 @@ export class InputManager {
     const g = this.bindings.gamepad;
     const k = this.bindings.keyboard;
     // One-shot actions: a key counts if it is held now OR was tapped since the last poll.
-    const key = (code: string) => this.keys.has(code) || this.tapped.has(code);
+    const typing = isTextField(document.activeElement);
+    const key = (code: string) => !typing && (this.keys.has(code) || this.tapped.has(code));
     const reset = !this.capture && (key(k.reset) || (!!gp && pressed(gp, g.reset)));
     const toggleCam = !this.capture && (key(k.ballCam) || (!!gp && pressed(gp, g.ballCam)));
     const menu = !this.capture && (key(k.menu) || (!!gp && pressed(gp, g.menu)));
@@ -339,6 +342,11 @@ export class InputManager {
       airRoll,
     };
   }
+}
+
+/** True while a text field has focus, so keys type instead of driving or navigating. */
+export function isTextField(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
 }
 
 function zeroed(): CarInput {

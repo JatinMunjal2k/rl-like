@@ -1,15 +1,37 @@
 # RL-like
 
-A browser car-soccer game in the spirit of Rocket League. Current scope: free play, one car, one ball, gamepad or keyboard, rebindable controls.
+A browser car-soccer game in the spirit of Rocket League: free play, or online matches with friends hosted straight from one player's browser tab. Gamepad or keyboard, rebindable controls.
 
-## Run
+Play it at https://jatinmunjal2k.github.io/rl-like/ (deployed from `main` by GitHub Actions).
+
+## Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the printed URL (default http://127.0.0.1:5173). Press any button on a connected controller so the browser exposes it. The game starts on a menu with **Free Play** and **Settings** (control bindings). Esc or Start opens the menu during play, which pauses the match.
+Open the printed URL (default http://127.0.0.1:5173). Press any button on a connected controller so the browser exposes it. The game starts on a menu with **Free Play**, **Multiplayer** and **Settings**. Esc or Start opens the menu during play; free play pauses, an online match keeps running.
+
+## Multiplayer
+
+One player picks **Multiplayer → Host a room** and gets a five-letter code. Friends open the same site, enter the code and **Join**. The host's lobby shows both teams (switch with one button), the match length, and **Start match**. Up to eight players; people can join or leave mid-match.
+
+How it works:
+
+- **The host's tab is the server.** It runs the authoritative `Game` at 120 Hz, applies every player's input for the tick it was stamped with (repeating the last one when a packet is late) and sends the complete game state to each client 60 times a second (about 300 bytes with four cars).
+- **Transport is WebRTC via PeerJS.** PeerJS's free public broker only does the introduction; game traffic flows peer to peer. On top of PeerJS's reliable channel a second data channel is opened unordered with no retransmits, so a lost packet never delays the ones behind it; if that channel cannot be set up, packets fall back to the reliable one. PeerJS's default STUN/TURN servers get through most home NATs.
+- **Clients predict.** Each client runs its own `Game` a few ticks ahead of the host, so its car and the ball react instantly. Every snapshot is compared with what the client predicted for that tick; when they differ (someone else touched the ball, an input arrived late) the client rewinds to the snapshot and replays its unacknowledged inputs. Because Rapier is deterministic and the whole state is serialised, a replay of untouched play is bit-identical, so most snapshots need no replay at all. Corrections are folded into a visual offset that fades over about a tenth of a second instead of snapping.
+- **Other cars are shown from snapshots**, interpolated a few ticks in the past (extrapolated briefly if a packet is lost), with the player's name floating above.
+- **Clock sync.** Each snapshot tells the client how far ahead of the host's simulation its inputs are arriving; the client speeds up or slows its simulation slightly to keep about three ticks of margin, jumps only after the lead has been badly off for half a second, and catches up locally when a late frame let the host get ahead.
+- **Background tabs.** Browsers throttle a hidden tab's frame loop to about once a second, which would freeze a hosted match. A tiny Web Worker (whose timers are not throttled) ticks the network session while the tab is hidden, so the host can tab out without stopping the game. The player's own car coasts meanwhile.
+- **Match flow online:** three-second kickoff countdown with cars frozen, RocketSim's kickoff placement (blue takes shuffled spawn *i*, orange the mirror), real boost with pads, a match clock (unlimited, 3, 5 or 10 minutes), overtime with a fresh kickoff on a tie, and a result banner. Dodge deadzone is a player setting, so each client sends theirs and the host simulates that player's car with it.
+
+Known limits: no bumps or demolitions yet (cars collide as rigid bodies); a client cannot reset the match; if the host closes the tab the room ends; the PeerJS public broker occasionally refuses connections, in which case hosting again gets a new code.
+
+## Deploying
+
+`.github/workflows/deploy.yml` builds `dist/` with Vite and publishes it to GitHub Pages on every push to `main` (Pages source set to *GitHub Actions*). Vite's `base: './'` keeps the site working under the `/rl-like/` path. Nothing else to run: the multiplayer needs no server of ours.
 
 ## Default controls
 
@@ -47,7 +69,18 @@ src/
   main.ts     Frame loop: fixed-step accumulator, interpolated rendering, pause on menu
 ```
 
-The simulation only depends on Rapier and three's math classes, so it can run headless in Node. That is the seam for a future authoritative multiplayer server: the server runs `Game.step` with each player's `CarInput`, clients predict locally and reconcile from `Snapshot`s.
+The simulation only depends on Rapier and three's math classes, so it can run headless in Node. That is the seam the multiplayer uses: the host runs `Game.step` with every player's `CarInput`, clients predict locally and reconcile from serialised game states (`Game.serialize` / `Game.restore`).
+
+```
+src/
+  net/
+    protocol.ts    Control messages (JSON) and binary packets: inputs, snapshots, ping
+    transport.ts   PeerJS signalling, one reliable + one unreliable data channel per peer
+    session.ts     Session interface shared by free play, host and client
+    host.ts        Lobby, input buffering per client, authoritative stepping, snapshot broadcast
+    client.ts      Prediction, reconciliation, remote-car interpolation, visual smoothing
+  sim/state.ts     Byte writer/reader, input quantisation, seeded RNG
+```
 
 ## Car model
 
@@ -89,8 +122,8 @@ Car-ball contact follows RocketSim's `_OnHit`: restitution 0, the extra impulse 
 ## Match flow and HUD
 
 - 34 boost pads at RL's positions with RL's pickup volumes (cylinder 208/144 uu radius, 95 uu tall, or box 160/120 uu, 64 uu tall), 100 / 12 boost, 10 s / 4 s cooldown. Free play currently uses infinite boost; pads still light up and recharge.
-- Reset cycles through RL's five blue spawn points in a shuffled order that changes every cycle.
-- On a goal the ball disappears for 2 s while play continues; then car and ball reset to kickoff. The banner shows the goal speed in km/h and uu/s.
+- Reset cycles through RL's five spawn points in a shuffled order that changes every cycle (RocketSim's kickoff placement with more cars: blue car *i* takes spawn *i* of the shuffle, orange the mirror image).
+- On a goal the ball disappears for 2 s while play continues; then cars and ball reset to kickoff. The banner shows the scorer and the goal speed in km/h.
 - Wheel "extra pushback" (RocketSim): past 2.5 uu of compression a wheel ray acts as a rigid contact, so hard or tilted landings stop on the wheels instead of sinking the hitbox into the floor and being fired back up by the springs.
 - HUD: score, FPS (top right), ball-cam indicator and controller status (bottom left), speed in uu/s and an RL-style boost gauge (bottom right). Speed turns red, larger and pulsing at the 2300 uu/s cap; the boost flame goes white when supersonic.
 - The menu shows over black with the game not rendered.
@@ -105,8 +138,8 @@ Rapier integrates gyroscopic precession for the car's box inertia, so any rotati
 
 ## Physics still missing compared to Rocket League
 
-1. Car-car bumps and demolitions.
-2. Kickoff countdown and respawn positions.
+1. Car-car bumps and demolitions (cars do collide as rigid bodies).
+2. Respawn positions for more than five cars per team.
 3. Exact arena mesh details above.
 4. Supersonic has no gameplay effect beyond the indicator (in RL it matters for demos).
 5. RocketSim itself compiled to WebAssembly would replace `sim/` for tick-exact physics.

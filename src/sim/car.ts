@@ -2,7 +2,42 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Quaternion, Vector3 } from 'three';
 import { BT, CAR, GRAVITY, M_TO_BT, OCTANE, UU, curve } from './rl';
 import { TUNING } from './tuning';
-import type { CarInput } from '../input/types';
+import { EMPTY_INPUT, type CarInput } from '../input/types';
+import { readInput, writeInput, type ByteReader, type ByteWriter } from './state';
+
+export type Team = 'blue' | 'orange';
+
+interface V3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** Decoded serialize() record. `flags` packs the booleans (see serialize). */
+export interface CarState {
+  pos: V3;
+  rot: { x: number; y: number; z: number; w: number };
+  vel: V3;
+  angVel: V3;
+  preStepAngVel: V3;
+  boost: number;
+  handbrakeVal: number;
+  jumpTime: number;
+  airTimeSinceJump: number;
+  flipTime: number;
+  flipDirForward: number;
+  flipDirSide: number;
+  autoflipTimer: number;
+  boostingTime: number;
+  supersonicTime: number;
+  lastBallImpulseTick: number;
+  autoflipSign: number;
+  flags: number;
+  lastInput: CarInput;
+}
+
+export const CAR_FLAG_BOOSTING = 1;
+export const CAR_FLAG_SUPERSONIC = 2;
 
 // Car-local axes. Forward is -Z, right is +X, up is +Y.
 const LOCAL_FORWARD = new Vector3(0, 0, -1);
@@ -89,6 +124,9 @@ const impulse = new Vector3();
 const localAng = new Vector3();
 
 export interface CarOptions {
+  /** Stable identity across host and clients (the player's slot). */
+  id: number;
+  team: Team;
   infiniteBoost?: boolean;
 }
 
@@ -99,8 +137,17 @@ export interface CarOptions {
  * follow RocketSim's Car::_PreTickUpdate. See rl.ts for sources.
  */
 export class Car {
+  readonly id: number;
+  readonly team: Team;
   readonly body: RAPIER.RigidBody;
   readonly collider: RAPIER.Collider;
+  /** Last input applied to this car; the host holds it when a client's packet is late. */
+  lastInput: CarInput = { ...EMPTY_INPUT };
+  /** Tick of the last car-ball extra impulse (see Game.applyCarBallExtraImpulse). */
+  lastBallImpulseTick = -10;
+  /** Velocity and position handed to the solver this tick (RocketSim's contact callback sees these). */
+  readonly preStepVel = new Vector3();
+  readonly preStepPos = new Vector3();
 
   /** ≥3 wheels touching something (RL's isOnGround). */
   grounded = false;
@@ -120,7 +167,6 @@ export class Car {
   /** Per-tick diagnostics (vertical components of impulses applied this tick, in m/s of chassis velocity). */
   readonly debug = { suspensionDvY: 0, frictionDvY: 0, maxCompression: 0, minInvDot: 0 };
 
-  private ballCollider: RAPIER.Collider | null = null;
   private readonly wheels: WheelState[] = WHEELS.map(() => ({
     contact: false,
     point: new Vector3(),
@@ -145,8 +191,10 @@ export class Car {
 
   constructor(
     private readonly world: RAPIER.World,
-    options: CarOptions = {},
+    options: CarOptions,
   ) {
+    this.id = options.id;
+    this.team = options.team;
     this.infiniteBoost = options.infiniteBoost ?? false;
 
     this.body = world.createRigidBody(
@@ -173,9 +221,134 @@ export class Car {
     );
   }
 
-  /** The ball is excluded from "world contact" checks (touching it does not enable autoflip). */
-  setBallCollider(c: RAPIER.Collider): void {
-    this.ballCollider = c;
+  /** Remove the body (and collider) from the world. The car is unusable afterwards. */
+  destroy(): void {
+    this.world.removeRigidBody(this.body);
+  }
+
+  /**
+   * Everything needed to continue the simulation from this exact state: rigid body transform and
+   * velocities plus every timer and flag the tick logic reads. Wheel contacts and world contact
+   * are recomputed at the start of each tick, so they are not stored.
+   */
+  serialize(w: ByteWriter): void {
+    const t = this.body.translation();
+    const r = this.body.rotation();
+    const lv = this.body.linvel();
+    const av = this.body.angvel();
+    w.f32(t.x);
+    w.f32(t.y);
+    w.f32(t.z);
+    w.f32(r.x);
+    w.f32(r.y);
+    w.f32(r.z);
+    w.f32(r.w);
+    w.f32(lv.x);
+    w.f32(lv.y);
+    w.f32(lv.z);
+    w.f32(av.x);
+    w.f32(av.y);
+    w.f32(av.z);
+    w.f32(this.preStepAngVel.x);
+    w.f32(this.preStepAngVel.y);
+    w.f32(this.preStepAngVel.z);
+    w.f32(this.boost);
+    w.f32(this.handbrakeVal);
+    w.f32(this.jumpTime);
+    w.f32(this.airTimeSinceJump);
+    w.f32(this.flipTime);
+    w.f32(this.flipDirForward);
+    w.f32(this.flipDirSide);
+    w.f32(this.autoflipTimer);
+    w.f32(this.boostingTime);
+    w.f32(this.supersonicTime);
+    w.i32(this.lastBallImpulseTick);
+    w.i8(this.autoflipSign);
+    w.u16(
+      (this.boosting ? 1 : 0) |
+        (this.supersonic ? 2 : 0) |
+        (this.isJumping ? 4 : 0) |
+        (this.isFlipping ? 8 : 0) |
+        (this.isAutoflipping ? 16 : 0) |
+        (this.hasJumped ? 32 : 0) |
+        (this.hasDoubleJumped ? 64 : 0) |
+        (this.hasFlipped ? 128 : 0) |
+        (this.prevJump ? 256 : 0) |
+        (this.grounded ? 512 : 0),
+    );
+    writeInput(w, this.lastInput);
+  }
+
+  /** Decode one serialize() record into a plain object without touching any car. */
+  static decode(r: ByteReader): CarState {
+    const s: CarState = {
+      pos: { x: r.f32(), y: r.f32(), z: r.f32() },
+      rot: { x: r.f32(), y: r.f32(), z: r.f32(), w: r.f32() },
+      vel: { x: r.f32(), y: r.f32(), z: r.f32() },
+      angVel: { x: r.f32(), y: r.f32(), z: r.f32() },
+      preStepAngVel: { x: r.f32(), y: r.f32(), z: r.f32() },
+      boost: r.f32(),
+      handbrakeVal: r.f32(),
+      jumpTime: r.f32(),
+      airTimeSinceJump: r.f32(),
+      flipTime: r.f32(),
+      flipDirForward: r.f32(),
+      flipDirSide: r.f32(),
+      autoflipTimer: r.f32(),
+      boostingTime: r.f32(),
+      supersonicTime: r.f32(),
+      lastBallImpulseTick: r.i32(),
+      autoflipSign: r.i8(),
+      flags: r.u16(),
+      lastInput: EMPTY_INPUT,
+    };
+    s.lastInput = readInput(r);
+    return s;
+  }
+
+  restore(r: ByteReader): void {
+    this.applyState(Car.decode(r));
+  }
+
+  applyState(s: CarState): void {
+    this.body.setTranslation(s.pos, true);
+    this.body.setRotation(s.rot, true);
+    this.body.setLinvel(s.vel, true);
+    this.body.setAngvel(s.angVel, true);
+    this.preStepAngVel.set(s.preStepAngVel.x, s.preStepAngVel.y, s.preStepAngVel.z);
+    this.boost = s.boost;
+    this.handbrakeVal = s.handbrakeVal;
+    this.jumpTime = s.jumpTime;
+    this.airTimeSinceJump = s.airTimeSinceJump;
+    this.flipTime = s.flipTime;
+    this.flipDirForward = s.flipDirForward;
+    this.flipDirSide = s.flipDirSide;
+    this.autoflipTimer = s.autoflipTimer;
+    this.boostingTime = s.boostingTime;
+    this.supersonicTime = s.supersonicTime;
+    this.lastBallImpulseTick = s.lastBallImpulseTick;
+    this.autoflipSign = s.autoflipSign;
+    const f = s.flags;
+    this.boosting = !!(f & 1);
+    this.supersonic = !!(f & 2);
+    this.isJumping = !!(f & 4);
+    this.isFlipping = !!(f & 8);
+    this.isAutoflipping = !!(f & 16);
+    this.hasJumped = !!(f & 32);
+    this.hasDoubleJumped = !!(f & 64);
+    this.hasFlipped = !!(f & 128);
+    this.prevJump = !!(f & 256);
+    this.grounded = !!(f & 512);
+    this.lastInput = s.lastInput;
+  }
+
+  /** Byte length of one serialize() record. */
+  static readonly SERIALIZED_BYTES = 16 * 4 + 10 * 4 + 4 + 1 + 2 + 6;
+
+  /** Freeze in place (kickoff countdown) or release. */
+  setFrozen(frozen: boolean): void {
+    const type = frozen ? RAPIER.RigidBodyType.Fixed : RAPIER.RigidBodyType.Dynamic;
+    if (this.body.bodyType() !== type) this.body.setBodyType(type, true);
   }
 
   /** Place the car at rest on flat ground at (x, z) with the given yaw (0 = facing -Z). */
@@ -205,9 +378,12 @@ export class Car {
     this.autoflipTimer = 0;
     this.boostingTime = 0;
     this.supersonicTime = 0;
+    this.lastBallImpulseTick = -10;
+    this.lastInput = { ...EMPTY_INPUT };
   }
 
   tick(input: CarInput, dt: number): void {
+    this.lastInput = input;
     this.readState();
     const jumpPressed = input.jump && !this.prevJump;
 
@@ -262,6 +438,8 @@ export class Car {
     this.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
     this.body.setAngvel({ x: angVel.x, y: angVel.y, z: angVel.z }, true);
     this.preStepAngVel.copy(angVel);
+    this.preStepVel.copy(vel);
+    this.preStepPos.copy(pos);
     this.prevJump = input.jump;
   }
 
@@ -351,11 +529,13 @@ export class Car {
     else groundUp.copy(up);
   }
 
-  /** Hitbox touching arena geometry (anything but the ball). Sets contactNormal pointing at the car. */
+  /** Hitbox touching arena geometry (fixed bodies only: not the ball, not other cars). Sets contactNormal pointing at the car. */
   private probeWorldContact(): void {
     this.worldContact = false;
     this.world.contactPairsWith(this.collider, (other) => {
-      if (this.worldContact || other === this.ballCollider) return;
+      if (this.worldContact) return;
+      const parent = other.parent();
+      if (!parent || !parent.isFixed()) return;
       this.world.contactPair(this.collider, other, (manifold, flipped) => {
         if (this.worldContact) return;
         for (let i = 0; i < manifold.numContacts(); i++) {

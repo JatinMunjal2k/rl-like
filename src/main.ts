@@ -11,7 +11,7 @@ import { loadSettings, saveSettings } from './settings';
 import { LocalSession, type Session } from './net/session';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
-import { describeError } from './net/transport';
+import { describeError, loadIceConfig, testConnectivity, turnConfigured } from './net/transport';
 
 const app = document.getElementById('app')!;
 const hudEl = document.getElementById('hud')!;
@@ -70,6 +70,8 @@ async function main(): Promise<void> {
   const input = new InputManager(settings);
   const menu = new Menu(document.body, input, settings);
   const sound = new SoundManager();
+  // Relay credentials, if the deployment has any. Never blocks startup.
+  const iceReady = loadIceConfig();
 
   let session: Session | null = null;
 
@@ -161,6 +163,7 @@ async function main(): Promise<void> {
     endSession();
     menu.setMultiplayerStatus('Creating room…', true);
     try {
+      await iceReady;
       const host = await HostSession.create(name);
       host.hostDodgeDeadzone = settings.controls.dodgeDeadzone;
       attach(host);
@@ -174,6 +177,7 @@ async function main(): Promise<void> {
     endSession();
     menu.setMultiplayerStatus(`Joining ${code}…`, true);
     try {
+      await iceReady;
       const client = await ClientSession.create(code, name, settings.controls.dodgeDeadzone);
       attach(client);
       menu.setMultiplayerStatus('');
@@ -209,6 +213,34 @@ async function main(): Promise<void> {
       menu.show('lobby');
     }
   };
+  /**
+   * Report what this network allows. `host` means a direct path on this machine or LAN, `srflx`
+   * means the public address found through STUN, `relay` means a TURN relay answered. Two players
+   * on different home networks usually need a relay.
+   */
+  menu.onTestConnection = async () => {
+    await iceReady;
+    menu.setConnectionReport('Testing…');
+    const direct = await testConnectivity(false);
+    const relay = await testConnectivity(true);
+    const has = (t: string) => direct.candidateTypes.includes(t);
+    const lines = [
+      `Direct (same machine or LAN):  ${has('host') ? 'yes' : 'no'}`,
+      `Public address via STUN:       ${has('srflx') ? 'yes' : 'no'}`,
+      `Relay configured:              ${turnConfigured() ? 'yes' : 'no'}`,
+      `Relay reachable:               ${relay.candidateTypes.includes('relay') ? 'yes' : 'no'}`,
+    ];
+    if (!turnConfigured()) {
+      lines.push('', 'No relay is set up, so you can only play with someone', 'whose network allows a direct connection. Add one in', 'public/turn.json to make every network work.');
+    } else if (!relay.candidateTypes.includes('relay')) {
+      lines.push('', 'The relay did not answer. Check the credentials in', 'public/turn.json (they may have expired).');
+    } else {
+      lines.push('', 'Ready: connections will fall back to the relay when', 'a direct path is not possible.');
+    }
+    if (relay.errors.length) lines.push('', `ICE notes: ${relay.errors.slice(0, 2).join(' | ')}`);
+    menu.setConnectionReport(lines.join('\n'));
+  };
+
   menu.onSettingsChanged = applySettings;
   menu.onPlay = () => {
     resetFrameTimers();

@@ -1,0 +1,5 @@
+{
+  "_comment": "Relay (TURN) servers. Without one, players whose networks cannot reach each other directly will fail to connect. Free options: Cloudflare Realtime TURN (1 TB/month) or Metered (20 GB/month). Fill in iceServers, OR set credentialsUrl to a provider endpoint that returns an iceServers array.",
+  "iceServers": [],
+  "credentialsUrl": ""
+}

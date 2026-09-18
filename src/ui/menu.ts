@@ -46,6 +46,7 @@ export class Menu {
   onQuit: (() => void) | null = null;
   onHost: ((name: string) => void) | null = null;
   onJoin: ((name: string, code: string) => void) | null = null;
+  onTestConnection: (() => void) | null = null;
   onLeaveRoom: (() => void) | null = null;
   onSwitchTeam: (() => void) | null = null;
   onCycleMatchLength: (() => void) | null = null;
@@ -303,6 +304,7 @@ export class Menu {
   // ---------------------------------------------------------------------------
 
   private mpStatusEl!: HTMLElement;
+  private mpReportEl!: HTMLElement;
   private mpButtons: HTMLButtonElement[] = [];
 
   private buildMultiplayer(): void {
@@ -354,7 +356,12 @@ export class Menu {
 
     this.mpStatusEl = el('p', 'menu-status');
     p.el.appendChild(this.mpStatusEl);
-    this.addButton(p, p.el, 'Back', 4, 0, () => this.back());
+    const testBtn = this.addButton(p, p.el, 'Test connection', 4, 0, () => this.onTestConnection?.());
+    testBtn.classList.add('subtle');
+    this.mpReportEl = el('div', 'net-report');
+    this.mpReportEl.hidden = true;
+    p.el.appendChild(this.mpReportEl);
+    this.addButton(p, p.el, 'Back', 5, 0, () => this.back());
     this.mpButtons = [hostBtn, joinBtn];
   }
 
@@ -362,6 +369,12 @@ export class Menu {
     this.mpStatusEl.textContent = this.mpStatus;
     this.mpStatusEl.classList.toggle('busy', this.mpBusy);
     for (const b of this.mpButtons) b.disabled = this.mpBusy;
+  }
+
+  /** Show the result of a connection test (plain lines; empty string hides the block). */
+  setConnectionReport(lines: string): void {
+    this.mpReportEl.textContent = lines;
+    this.mpReportEl.hidden = lines === '';
   }
 
   private hostClicked(): void {

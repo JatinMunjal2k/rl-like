@@ -10,7 +10,7 @@ All assets below are used under their stated licenses. Nothing here is from Rock
 - **Boost roar / ignition, goal explosion, big pad pickup** (`boost_loop.ogg`, `boost_ignite.ogg`, `goal_crunch.ogg`, `goal_boom.ogg`, `pad_big.ogg`): Kenney, *Sci-fi Sounds* — https://kenney.nl/assets/sci-fi-sounds — CC0 1.0.
 - **Ball hits, car hits, landings** (`ball_hit_*.ogg`, `car_hit_*.ogg`, `land_*.ogg`): Kenney, *Impact Sounds* — https://kenney.nl/assets/impact-sounds — CC0 1.0.
 - **Small pad pickup, countdown tick and go** (`pad_small.ogg`, `count_tick.ogg`, `count_go.ogg`): Kenney, *Interface Sounds* — https://kenney.nl/assets/interface-sounds — CC0 1.0.
-- **Crowd ambience loop** (`crowd_loop.ogg`): *Crowd Shouting/Speaking Ambience* — https://opengameart.org/content/crowd-shoutingspeaking-ambience — CC0 1.0.
-- **Goal cheer** (`cheer.mp3`): Gregor Quendel, *Free Crowd Cheering Sounds*, track 04 — https://opengameart.org/content/free-crowd-cheering-sounds — CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 
-Everything else (whooshes, skid, wind, beeps, horn) is synthesised at runtime with WebAudio.
+Everything else (whooshes, skid, wind, beeps, horn) is synthesised at runtime with WebAudio. Every sample above is CC0, so no attribution is required; it is recorded here anyway.
+
+There is deliberately no crowd or stadium ambience: sound is only ever a response to something the player did.

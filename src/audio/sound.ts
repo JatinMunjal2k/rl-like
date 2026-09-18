@@ -1,8 +1,11 @@
 /**
- * Sound: sampled where a real recording matters (engine, boost, impacts, crowd, goal), synthesised
- * where a clean tonal or noise sweep works better (jump/dodge whooshes, skid, wind, beeps). Samples
- * are CC0 / CC-BY assets listed in public/CREDITS.md; if one fails to load its synthesised
- * stand-in plays instead, so the game is never silent.
+ * Sound: sampled where a real recording matters (engine, boost, impacts, goal), synthesised where
+ * a clean tonal or noise sweep works better (jump/dodge whooshes, skid, wind, beeps). Samples are
+ * CC0 assets listed in public/CREDITS.md; if one fails to load its synthesised stand-in plays
+ * instead.
+ *
+ * Every layer is driven by what the player is doing, and there is no ambience: with no input and
+ * the car at rest the mix is silent.
  *
  * An AudioContext can only start from a user gesture, so `start()` is called when the player
  * leaves the menu (a click or key press).
@@ -59,8 +62,6 @@ const SAMPLE_FILES = {
   padBig: 'pad_big.ogg',
   countTick: 'count_tick.ogg',
   countGo: 'count_go.ogg',
-  crowdLoop: 'crowd_loop.ogg',
-  cheer: 'cheer.mp3',
 } as const;
 type SampleName = keyof typeof SAMPLE_FILES;
 
@@ -78,7 +79,6 @@ export class SoundManager {
   private ctx: AudioContext | null = null;
   private master!: GainNode;
   private sfxBus!: GainNode;
-  private ambienceBus!: GainNode;
   private readonly samples = new Map<SampleName, AudioBuffer>();
   private loading: Promise<void> | null = null;
 
@@ -90,7 +90,6 @@ export class SoundManager {
   private engineOsc!: OscillatorNode;
   private engineOsc2!: OscillatorNode;
   private boostLoop: Loop | null = null;
-  private crowd: Loop | null = null;
   private boostNoise!: NoiseLayer;
   private roll!: NoiseLayer;
   private skid!: NoiseLayer;
@@ -99,7 +98,6 @@ export class SoundManager {
   private volume = 0.6;
   private lastHitAt = 0;
   private lastCarHitAt = 0;
-  private cheerUntil = 0;
 
   get started(): boolean {
     return this.ctx !== null;
@@ -130,9 +128,6 @@ export class SoundManager {
     this.master.connect(comp).connect(ctx.destination);
     this.sfxBus = ctx.createGain();
     this.sfxBus.connect(this.master);
-    this.ambienceBus = ctx.createGain();
-    this.ambienceBus.gain.value = 0.35;
-    this.ambienceBus.connect(this.master);
 
     // Synth engine (fallback until samples arrive, or forever if they never do).
     this.engineSynthGain = ctx.createGain();
@@ -188,11 +183,6 @@ export class SoundManager {
     }
     const boost = this.samples.get('boostLoop');
     if (boost) this.boostLoop = this.startLoop(boost, this.sfxBus);
-    const crowd = this.samples.get('crowdLoop');
-    if (crowd) {
-      this.crowd = this.startLoop(crowd, this.ambienceBus);
-      this.crowd.gain.gain.value = 0.5;
-    }
   }
 
   private startLoop(buffer: AudioBuffer, bus: AudioNode): Loop {
@@ -256,7 +246,8 @@ export class SoundManager {
       const rate = 0.7 + rpm * 0.9;
       this.engineLow.src.playbackRate.setTargetAtTime(rate, t, 0.08);
       this.engineHigh.src.playbackRate.setTargetAtTime(rate * 0.95, t, 0.08);
-      const level = (0.06 + 0.1 * throttle + 0.06 * ratio) * (f.grounded ? 1 : 0.75);
+      // No constant idle term: standing still with no throttle is silent.
+      const level = (0.12 * throttle + 0.07 * ratio) * (f.grounded ? 1 : 0.75);
       const blend = Math.min(1, Math.max(0, (ratio - 0.25) / 0.6));
       this.engineLow.gain.gain.setTargetAtTime(level * (1 - blend * 0.7), t, 0.08);
       this.engineHigh.gain.gain.setTargetAtTime(level * blend, t, 0.08);
@@ -266,7 +257,7 @@ export class SoundManager {
       this.engineOsc.frequency.setTargetAtTime(targetFreq, t, 0.08);
       this.engineOsc2.frequency.setTargetAtTime(targetFreq * 1.5, t, 0.08);
       this.engineSynthFilter.frequency.setTargetAtTime(350 + 1800 * ratio + 400 * throttle, t, 0.1);
-      this.engineSynthGain.gain.setTargetAtTime((0.012 + 0.03 * throttle + 0.018 * ratio) * (f.grounded ? 1 : 0.7), t, 0.08);
+      this.engineSynthGain.gain.setTargetAtTime((0.035 * throttle + 0.022 * ratio) * (f.grounded ? 1 : 0.7), t, 0.08);
     }
 
     // Tyres rolling on the floor: quiet low rumble that grows with speed, gone in the air.
@@ -290,9 +281,6 @@ export class SoundManager {
 
     // Supersonic wind.
     this.wind.gain.gain.setTargetAtTime(f.supersonic ? 0.12 : ratio > 0.8 ? 0.04 * (ratio - 0.8) * 5 : 0, t, 0.15);
-
-    // Crowd: murmur that swells after a goal.
-    if (this.crowd) this.crowd.gain.gain.setTargetAtTime(t < this.cheerUntil ? 1.0 : 0.5, t, 0.5);
 
     if (f.jumped) this.whoosh(500, 1400, 0.16, 0.22);
     if (f.doubleJumped) this.whoosh(800, 2000, 0.14, 0.2);
@@ -339,8 +327,6 @@ export class SoundManager {
       this.goalHorn();
       if (!this.play('goalCrunch', 0.7, 0.9)) this.explosion();
       this.play('goalBoom', 0.8, 1);
-      this.cheerUntil = t + 4;
-      if (!this.play('cheer', 0.8, 1, this.ambienceBus, 0.15)) this.crowdSwell();
     }
   }
 
@@ -469,27 +455,6 @@ export class SoundManager {
     src.start(t);
     src.stop(t + 0.8);
     this.thump(45, 0.5, 0.4);
-  }
-
-  /** Fallback crowd swell: the ambience noise rises and falls over a few seconds. */
-  private crowdSwell(): void {
-    const ctx = this.ctx!;
-    const t = ctx.currentTime;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noiseBuffer;
-    src.loop = true;
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 600;
-    filter.Q.value = 0.5;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.25, t + 0.6);
-    g.gain.setValueAtTime(0.25, t + 2.5);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 4.5);
-    src.connect(filter).connect(g).connect(this.ambienceBus);
-    src.start(t);
-    src.stop(t + 4.6);
   }
 
   private goalHorn(): void {

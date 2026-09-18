@@ -1,5 +1,12 @@
 {
-  "_comment": "Relay (TURN) servers. Without one, players whose networks cannot reach each other directly will fail to connect. Free options: Cloudflare Realtime TURN (1 TB/month) or Metered (20 GB/month). Fill in iceServers, OR set credentialsUrl to a provider endpoint that returns an iceServers array.",
-  "iceServers": [],
-  "credentialsUrl": ""
+  "_readme": [
+    "Relay (TURN) servers for multiplayer. Without one, only players whose networks can reach each other directly will connect; everyone else times out.",
+    "Metered free tier (20 GB/month): sign up at https://dashboard.metered.ca, create an app, copy the API key, then set credentialsUrl below to:",
+    "https://<your-app>.metered.live/api/v1/turn/credentials?apiKey=<your-key>",
+    "That endpoint returns a ready-made iceServers array and rotates the credentials on every load.",
+    "Alternatively paste servers directly into iceServers and leave credentialsUrl empty.",
+    "Check the result in the game under Multiplayer -> Test connection."
+  ],
+  "credentialsUrl": "",
+  "iceServers": []
 }

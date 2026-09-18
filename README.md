@@ -23,11 +23,14 @@ How it works:
 - **Transport is WebRTC via PeerJS.** PeerJS's free public broker only does the introduction; game traffic flows peer to peer. On top of PeerJS's reliable channel a second data channel is opened unordered with no retransmits, so a lost packet never delays the ones behind it; if that channel cannot be set up, packets fall back to the reliable one.
 - **A relay (TURN) is required for most pairs of players.** Two peers connect directly only when one side's router accepts an inbound connection. Between two home networks, on mobile or carrier-grade NAT, or even between two browser profiles behind a router that will not hairpin, the only path is a TURN relay. PeerJS's built-in relay hosts (`eu-0`/`us-0.turn.peerjs.com`) no longer resolve in DNS, so the defaults are not used: `src/net/transport.ts` ships its own STUN list and reads relay credentials at runtime from `public/turn.json`, which is deployed with the site. Leave it empty and the game still runs, but only directly-reachable pairs can connect. **Multiplayer → Test connection** reports exactly what the current network allows.
 
+To add a relay, edit `public/turn.json` and redeploy (a push to `main` is enough). Either form works:
+
 ```json
-// public/turn.json — either form works
+{ "credentialsUrl": "https://<your-app>.metered.live/api/v1/turn/credentials?apiKey=<key>" }
 { "iceServers": [{ "urls": "turn:host:3478", "username": "u", "credential": "c" }] }
-{ "credentialsUrl": "https://<app>.metered.live/api/v1/turn/credentials?apiKey=..." }
 ```
+
+The first fetches short-lived credentials from the provider on every page load, which is what [Metered's free tier](https://dashboard.metered.ca) (20 GB/month, roughly 140 hours of two-player time) hands you after signup. Game traffic is about 40 KB/s per player pair, so the free quota is generous. Relay credentials in a public client are quota-limited by design; rotate the key if it is abused.
 - **Clients predict.** Each client runs its own `Game` a few ticks ahead of the host, so its car and the ball react instantly. Every snapshot is compared with what the client predicted for that tick; when they differ (someone else touched the ball, an input arrived late) the client rewinds to the snapshot and replays its unacknowledged inputs. Because Rapier is deterministic and the whole state is serialised, a replay of untouched play is bit-identical, so most snapshots need no replay at all. Corrections are folded into a visual offset that fades over about a tenth of a second instead of snapping.
 - **Other cars are shown from snapshots**, interpolated a few ticks in the past (extrapolated briefly if a packet is lost), with the player's name floating above.
 - **Clock sync.** Each snapshot tells the client how far ahead of the host's simulation its inputs are arriving; the client speeds up or slows its simulation slightly to keep about three ticks of margin, jumps only after the lead has been badly off for half a second, and catches up locally when a late frame let the host get ahead.

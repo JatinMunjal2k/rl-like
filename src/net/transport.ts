@@ -72,8 +72,23 @@ export async function loadIceConfig(): Promise<void> {
   }
 }
 
+/**
+ * `?relay=1` forces every connection through the TURN relay, skipping direct paths. That is the
+ * situation two players on different home networks are in, so it makes their case reproducible
+ * from one machine.
+ */
+export function relayForced(): boolean {
+  try {
+    return new URLSearchParams(location.search).get('relay') === '1';
+  } catch {
+    return false;
+  }
+}
+
 function peerOptions() {
-  return { debug: 1, config: { iceServers: iceServers(), iceCandidatePoolSize: 2, sdpSemantics: 'unified-plan' } };
+  const config: RTCConfiguration = { iceServers: iceServers(), iceCandidatePoolSize: 2 };
+  if (relayForced()) config.iceTransportPolicy = 'relay';
+  return { debug: 1, config };
 }
 
 /**

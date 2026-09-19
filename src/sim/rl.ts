@@ -329,6 +329,19 @@ export const BOOST_PADS = {
 };
 
 /** [RS] CAR_SPAWN_LOCATIONS_SOCCAR for the blue team: [x, y, yaw] with yaw measured from +x toward +y. */
+/**
+ * Demolitions, measured against car-soccer.com's RocketSim build by driving one car into another
+ * at a range of speeds and reading the DEMOED flag out of its state:
+ *  - a hit demolishes only when the attacking car's SUPERSONIC flag is set. Contacts at up to
+ *    1508 uu/s relative with the flag clear always bumped instead, and a hit at only 1040 uu/s
+ *    relative demolished once the flag was set (it lingers for a second after dropping below
+ *    2200, which is why the trigger is the flag and not the instantaneous speed).
+ *  - the victim respawns after exactly 360 ticks, 3.0 s.
+ */
+export const DEMO = {
+  respawnTime: 3.0, // [RS] measured: 360 ticks at 120 Hz
+};
+
 export const KICKOFF_SPAWNS: [number, number, number][] = [
   [-2048, -2560, Math.PI / 4],
   [2048, -2560, (Math.PI / 4) * 3],

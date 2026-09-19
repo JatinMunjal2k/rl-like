@@ -120,10 +120,11 @@ The car follows RocketSim's reverse-engineered vehicle:
 
 Reference footage: a pro's free-play session (Zen, https://www.youtube.com/watch?v=2goJD60z9Zs), sampled frame by frame for the pad pickups, ball streak, boost trails, glass walls and camera framing.
 
-- The car is Kenney's CC0 car-kit hatchback (about 2,000 triangles) fitted to the Octane hitbox, with the kit's racing wheels at RL's hardpoints and radii. The kit paints from one palette texture, so the body's paint hue is found from the mesh's dominant saturated texel and every shade of it is repainted per team at load; glass, lights and tyres keep their colours. Wheels steer with RL's steer curve, spin with speed and ride the suspension (their height comes from the physics ray probe). The box car remains as a fallback if the model fails to load.
+- The car is a boxy hot hatch in the Fennec mould, built in code rather than loaded: one extruded and bevelled side profile (short overhangs, raked screen, long flat roof, blunt tail) sized directly from the Octane hitbox, with a glasshouse, skirt, bumpers, lights and a roof spoiler on top. Wheels sit at RL's hardpoints and radii, steer with RL's steer curve, spin with speed and ride the suspension from the physics ray probe. Nothing is downloaded, so there is no load delay and the visible car is exactly the shape the physics collides with.
 - Boost pads are RL-style pickups: the six big pads float a glowing orb about a metre up on a lit ring, the small pads are a lit ring; a pad on cooldown loses its orb and its ring goes dark, and a pickup pops a short glow. Nine draw calls for all 34.
-- A landing marker: while the ball is airborne its flight is integrated (gravity plus drag) and a ring marks where it will meet the floor, growing with the time still to fall.
-- Controllers rumble on landings, ball hits, wall hits, dodges, boost and goals (dual-rumble where the browser supports it).
+- A ground marker: a ring on the floor directly beneath the ball at all times, fading in as the ball leaves the ground and growing slightly with height, so its horizontal position stays readable when it is high.
+- Controllers rumble on landings, ball hits, wall hits, dodges, boost, bumps, demolitions and goals (dual-rumble where the browser supports it).
+- HUD: ping sits next to the frame rate in the top right during an online match.
 - The ball has a hexagon-panel texture, a soft additive glow, a blob shadow on the floor that fades with height, and a white streak (camera-facing ribbon) once it moves faster than about 14 m/s. Cars have a blob shadow and a short team-coloured boost trail behind the flame.
 - Goals burst: a flash, an expanding ring and a spray of points in the scoring team's colour at the ball's last position.
 - Walls are opaque, single-sided (normals face inward) and textured as hexagon-mesh glass over a baked stadium: three seating tiers of soft speckle, walkway rails, roof struts, and the light rail at goal height. A gradient night-sky dome replaces the flat background.
@@ -144,6 +145,12 @@ The camera is a measured copy of car-soccer.com's camera kernel, which implement
 Speeds show in km/h (1 uu/s = 0.036 km/h; 2300 uu/s is 83 km/h).
 
 Car-ball contact follows RocketSim's `_OnHit`: restitution 0, the extra impulse computed from pre-collision velocities and positions, applied at most every other tick and only while the ball is still approaching. A 2000 uu/s flat hit on a resting ball leaves at about 3050 uu/s and 16°, peaking around 7 m.
+
+## Bumps and demolitions
+
+Cars collide as rigid bodies through Rapier, and RL's two extras sit on top. Driving one car into another on car-soccer.com's RocketSim build and reading the victim's `DEMOED` flag settled the rule: **a demolition happens when the attacking car's supersonic flag is set, not at any particular impact speed.** Contacts at up to 1508 uu/s relative never demolished while the flag was clear, and one at just 1040 uu/s did once it was set, because the flag lingers for a second after the car drops back below 2200. The victim respawns after 360 ticks, exactly 3.0 s; ours measures 3.008 s. Teammates never demolish each other.
+
+A demolished car is frozen and parked below the floor rather than removed, so its id, collider and network state survive the three seconds intact. The bump impulse for non-demolishing contacts is a straight proportion of relative speed with RL's upward kick (`tuning.ts`): the measurement could not separate it from the rigid-body collision cleanly enough to fit RL's curve.
 
 ## Physics audit against RocketSim
 
@@ -186,7 +193,7 @@ Rapier integrates gyroscopic precession for the car's box inertia, so any rotati
 
 ## Physics still missing compared to Rocket League
 
-1. Car-car bumps and demolitions (cars do collide as rigid bodies).
+1. The bump impulse curve (the demolition rule itself is measured; see below).
 2. Respawn positions for more than five cars per team.
 3. Exact arena mesh details above.
 4. Supersonic has no gameplay effect beyond the indicator (in RL it matters for demos).

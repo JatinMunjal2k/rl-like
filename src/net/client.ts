@@ -8,7 +8,7 @@
 import type { Peer } from 'peerjs';
 import { Quaternion, Vector3 } from 'three';
 import type { Team } from '../sim/car';
-import { CAR_FLAG_BOOSTING, CAR_FLAG_SUPERSONIC } from '../sim/car';
+import { CAR_FLAG_BOOSTING, CAR_FLAG_DEMOED, CAR_FLAG_SUPERSONIC } from '../sim/car';
 import { Game, type BodyState, type GameConfig, type GameState } from '../sim/game';
 import { TICK_DT, TICK_RATE } from '../sim/rl';
 import { ByteReader, quantizeInput } from '../sim/state';
@@ -42,6 +42,7 @@ interface RemoteSample {
   steer: number;
   boosting: boolean;
   supersonic: boolean;
+  demoed: boolean;
 }
 
 interface RemoteBuffer {
@@ -506,6 +507,7 @@ export class ClientSession implements Session {
         steer: s.lastInput.steer,
         boosting: !!(s.flags & CAR_FLAG_BOOSTING),
         supersonic: !!(s.flags & CAR_FLAG_SUPERSONIC),
+        demoed: !!(s.flags & CAR_FLAG_DEMOED),
       });
       if (buf.samples.length > 40) buf.samples.splice(0, buf.samples.length - 40);
     }
@@ -567,6 +569,7 @@ export class ClientSession implements Session {
         steer: b.steer,
         boosting: b.boosting,
         supersonic: b.supersonic,
+        demoed: b.demoed,
         offsetPos: null,
         offsetQuat: null,
         wheelY: null,

@@ -37,6 +37,8 @@ export interface SoundFrame {
   goal: boolean;
   /** Car hitting a wall this frame, uu/s, 0 if none. */
   wallHitSpeedUU: number;
+  /** Car-car bump this frame, relative uu/s, 0 if none. */
+  carBumpSpeedUU: number;
   /** Kickoff countdown: 1 = a number ticked, 2 = "go", 0 = nothing. */
   countdown: 0 | 1 | 2;
   /** Distance from the camera to the ball in metres, for hit attenuation. */
@@ -266,11 +268,19 @@ export class SoundManager {
 
     // Boost: sampled roar with a little noise on top for air; ignition burst on start.
     if (this.boostLoop) {
-      this.boostLoop.gain.gain.setTargetAtTime(f.boosting ? 0.45 : 0, t, f.boosting ? 0.03 : 0.1);
+      // Release fast and land exactly on zero: setTargetAtTime only approaches its target, so a
+      // tap used to leave the roar humming for half a second after the boost had stopped.
+      const g = this.boostLoop.gain.gain;
+      if (f.boosting) g.setTargetAtTime(0.45, t, 0.02);
+      else if (g.value > 0.0005) {
+        g.cancelScheduledValues(t);
+        g.setValueAtTime(g.value, t);
+        g.linearRampToValueAtTime(0, t + 0.05);
+      }
       this.boostLoop.src.playbackRate.setTargetAtTime(0.9 + 0.3 * ratio, t, 0.1);
-      this.boostNoise.gain.gain.setTargetAtTime(f.boosting ? 0.08 : 0, t, 0.05);
+      this.boostNoise.gain.gain.setTargetAtTime(f.boosting ? 0.08 : 0, t, f.boosting ? 0.03 : 0.02);
     } else {
-      this.boostNoise.gain.gain.setTargetAtTime(f.boosting ? 0.28 : 0, t, f.boosting ? 0.04 : 0.12);
+      this.boostNoise.gain.gain.setTargetAtTime(f.boosting ? 0.28 : 0, t, f.boosting ? 0.04 : 0.03);
     }
     this.boostNoise.filter.frequency.setTargetAtTime(700 + 900 * ratio, t, 0.1);
     if (f.boostStarted && !this.play('boostIgnite', 0.35, 1.4)) this.noiseBurst(0.12, 2500, 0.18, 'bandpass');
@@ -282,8 +292,12 @@ export class SoundManager {
     // Supersonic wind.
     this.wind.gain.gain.setTargetAtTime(f.supersonic ? 0.12 : ratio > 0.8 ? 0.04 * (ratio - 0.8) * 5 : 0, t, 0.15);
 
-    if (f.jumped) this.whoosh(500, 1400, 0.16, 0.22);
-    if (f.doubleJumped) this.whoosh(800, 2000, 0.14, 0.2);
+    // RL's weighting: the first jump is the loud one, the second a lighter flick.
+    if (f.jumped) {
+      this.whoosh(420, 1500, 0.18, 0.4);
+      this.thump(150, 0.09, 0.18);
+    }
+    if (f.doubleJumped) this.whoosh(900, 2100, 0.11, 0.13);
     if (f.dodged) {
       this.whoosh(300, 1800, 0.32, 0.26);
       this.thump(140, 0.08, 0.12);
@@ -294,10 +308,11 @@ export class SoundManager {
       else this.play('landSoft', 0.3 + 0.4 * k, 0.6 + 0.2 * Math.random());
       this.thump(70, 0.1 + 0.05 * k, 0.1 + 0.25 * k);
     }
+    // Pad pickups are a background detail in RL, not an event: keep them barely there.
     if (f.padCollected === 2) {
-      if (!this.play('padBig', 0.5, 1.2)) this.chime([523, 659, 784, 1047], 0.07, 0.22);
+      if (!this.play('padBig', 0.14, 1.3)) this.chime([784, 1047], 0.05, 0.06);
     } else if (f.padCollected === 1) {
-      if (!this.play('padSmall', 0.35, 1.6)) this.chime([988, 1319], 0.05, 0.12);
+      if (!this.play('padSmall', 0.07, 1.7)) this.chime([1175], 0.04, 0.035);
     }
     if (f.ballHitSpeedUU > 0 && t - this.lastHitAt > 0.05) {
       this.lastHitAt = t;
@@ -318,6 +333,12 @@ export class SoundManager {
       if (!this.playAny(['carHit0', 'carHit1', 'carHit2'], 0.25 + 0.6 * k, 0.8 + 0.3 * Math.random())) this.noiseBurst(0.12, 400, 0.5 * k);
       this.thump(90, 0.1, 0.25 * k);
     }
+    if (f.carBumpSpeedUU > 0 && t - this.lastCarHitAt > 0.08) {
+      this.lastCarHitAt = t;
+      const k = Math.min(1, f.carBumpSpeedUU / 2300);
+      if (!this.playAny(['carHit0', 'carHit1', 'carHit2'], 0.3 + 0.5 * k, 0.7 + 0.2 * Math.random())) this.noiseBurst(0.1, 500, 0.4 * k);
+      this.thump(70, 0.13, 0.3 * k);
+    }
     if (f.countdown === 1) {
       if (!this.play('countTick', 0.6, 1)) this.beep(880, 0.09, 0.18);
     } else if (f.countdown === 2) {
@@ -328,6 +349,14 @@ export class SoundManager {
       if (!this.play('goalCrunch', 0.7, 0.9)) this.explosion();
       this.play('goalBoom', 0.8, 1);
     }
+  }
+
+  /** A demolition: the heavy crunch plus a low boom, louder than any other impact. */
+  demolition(): void {
+    if (!this.ctx) return;
+    if (!this.play('goalCrunch', 0.85, 0.75)) this.explosion();
+    this.play('goalBoom', 0.6, 1.3);
+    this.thump(52, 0.35, 0.45);
   }
 
   // ---------------------------------------------------------------------------

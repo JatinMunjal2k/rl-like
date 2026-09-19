@@ -90,6 +90,21 @@ export const TUNING = {
   wallThickness: 1.0, // m, for the box colliders behind the goal mouths
 
   // ------------------------------------------------------------------------------
+  // Car-car contact
+  // ------------------------------------------------------------------------------
+  /**
+   * RL adds a bump impulse on top of the rigid-body collision, from a speed curve. Driving cars
+   * into each other on RocketSim gave victim velocity changes of roughly 140-230 uu/s at 1410 uu/s
+   * of relative speed, but the measurement could not separate the bump from the collision cleanly
+   * enough to fit the curve, so this is a straight proportion with RL's upward kick, clamped.
+   */
+  bumpVelPerRelSpeed: 0.12,
+  bumpMaxVel: 350 * UU,
+  bumpUpwardFraction: 0.2,
+  /** One bump per pair per this long, so a resting contact does not machine-gun impulses. */
+  bumpCooldown: 0.25,
+
+  // ------------------------------------------------------------------------------
   // Match flow
   // ------------------------------------------------------------------------------
   goalResetDelay: 2.0, // s. RL shows a replay; there is no physics value to match.

@@ -65,7 +65,6 @@ async function main(): Promise<void> {
   const probe = await Game.create(FREE_PLAY_CONFIG); // also initialises the physics engine
   const renderer = new Renderer(app, arenaGeometry, probe.pads);
   probe.destroy();
-  void renderer.loadAssets();
   const followCam = new FollowCamera(settings);
   const input = new InputManager(settings);
   const menu = new Menu(document.body, input, settings);
@@ -413,6 +412,17 @@ async function main(): Promise<void> {
       }
       prevPadCooldowns[i] = game.pads[i].cooldown;
     }
+    // Demolitions: burst, sound and a hard rumble for whoever was hit.
+    for (const d of game.demosThisTick) {
+      renderer.demoExplosion(d.x, d.y, d.z);
+      sound.demolition();
+      if (d.victim === s.localId) input.rumble(1, 1, 500);
+      else if (d.attacker === s.localId) input.rumble(0.7, 0.5, 250);
+    }
+    for (const b of game.bumpsThisTick) {
+      if (b.a === s.localId || b.b === s.localId) input.rumble(Math.min(1, b.speed / UU / 2000), 0.3, 110);
+    }
+
     const scoreTotal = game.score.blue + game.score.orange;
     const wallHit = localCar.worldContact && !prevWorldContact ? Math.hypot(lvNow.x, lvNow.y, lvNow.z) / UU : 0;
     sound.update({
@@ -428,6 +438,7 @@ async function main(): Promise<void> {
       landedSpeedUU,
       skid,
       padCollected,
+      carBumpSpeedUU: game.bumpsThisTick.length ? game.bumpsThisTick[0].speed / UU : 0,
       ballHitSpeedUU: game.ballHitRelSpeed / UU,
       ballBounceSpeedUU: game.ballBounceDeltaV / UU,
       goal: scoreTotal > prevScoreTotal,
@@ -490,7 +501,7 @@ async function main(): Promise<void> {
     }
 
     // Ping.
-    const pingText = s.ping === null ? '' : `PING ${Math.round(s.ping)} ms`;
+    const pingText = s.ping === null ? '' : `${Math.round(s.ping)} ms`;
     if (pingText !== lastPingText) {
       lastPingText = pingText;
       pingEl.hidden = pingText === '';

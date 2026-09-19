@@ -30,6 +30,7 @@ export interface CarState {
   autoflipTimer: number;
   boostingTime: number;
   supersonicTime: number;
+  demoTimer: number;
   lastBallImpulseTick: number;
   autoflipSign: number;
   flags: number;
@@ -38,6 +39,7 @@ export interface CarState {
 
 export const CAR_FLAG_BOOSTING = 1;
 export const CAR_FLAG_SUPERSONIC = 2;
+export const CAR_FLAG_DEMOED = 1024;
 
 // Car-local axes. Forward is -Z, right is +X, up is +Y.
 const LOCAL_FORWARD = new Vector3(0, 0, -1);
@@ -150,6 +152,11 @@ export class Car {
   /** Velocity and position handed to the solver this tick (RocketSim's contact callback sees these). */
   readonly preStepVel = new Vector3();
   readonly preStepPos = new Vector3();
+  /** Demolished: parked out of play and not simulated until `demoTimer` runs out. */
+  demoed = false;
+  demoTimer = 0;
+  /** Tick of the last bump involving this car, so one contact does not fire every tick. */
+  lastBumpTick = -1000;
 
   /** ≥3 wheels touching something (RL's isOnGround). */
   grounded = false;
@@ -284,6 +291,7 @@ export class Car {
     w.f32(this.autoflipTimer);
     w.f32(this.boostingTime);
     w.f32(this.supersonicTime);
+    w.f32(this.demoTimer);
     w.i32(this.lastBallImpulseTick);
     w.i8(this.autoflipSign);
     w.u16(
@@ -296,7 +304,8 @@ export class Car {
         (this.hasDoubleJumped ? 64 : 0) |
         (this.hasFlipped ? 128 : 0) |
         (this.prevJump ? 256 : 0) |
-        (this.grounded ? 512 : 0),
+        (this.grounded ? 512 : 0) |
+        (this.demoed ? 1024 : 0),
     );
     writeInput(w, this.lastInput);
   }
@@ -319,6 +328,7 @@ export class Car {
       autoflipTimer: r.f32(),
       boostingTime: r.f32(),
       supersonicTime: r.f32(),
+      demoTimer: r.f32(),
       lastBallImpulseTick: r.i32(),
       autoflipSign: r.i8(),
       flags: r.u16(),
@@ -348,6 +358,7 @@ export class Car {
     this.autoflipTimer = s.autoflipTimer;
     this.boostingTime = s.boostingTime;
     this.supersonicTime = s.supersonicTime;
+    this.demoTimer = s.demoTimer;
     this.lastBallImpulseTick = s.lastBallImpulseTick;
     this.autoflipSign = s.autoflipSign;
     const f = s.flags;
@@ -361,11 +372,32 @@ export class Car {
     this.hasFlipped = !!(f & 128);
     this.prevJump = !!(f & 256);
     this.grounded = !!(f & 512);
+    this.setDemoed(!!(f & 1024));
     this.lastInput = s.lastInput;
   }
 
   /** Byte length of one serialize() record. */
-  static readonly SERIALIZED_BYTES = 16 * 4 + 10 * 4 + 4 + 1 + 2 + 6;
+  static readonly SERIALIZED_BYTES = 16 * 4 + 11 * 4 + 4 + 1 + 2 + 6;
+
+  /**
+   * Demolished cars are parked below the floor and frozen rather than removed, so ids, colliders
+   * and the network state all stay put for the three seconds until they respawn.
+   */
+  setDemoed(demoed: boolean): void {
+    if (this.demoed === demoed) return;
+    this.demoed = demoed;
+    if (demoed) {
+      this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      this.setFrozen(true);
+      this.body.setTranslation({ x: 0, y: -60, z: 0 }, true);
+      this.boosting = false;
+      this.isJumping = false;
+      this.isFlipping = false;
+    } else {
+      this.setFrozen(false);
+    }
+  }
 
   /** Freeze in place (kickoff countdown) or release. */
   setFrozen(frozen: boolean): void {
@@ -402,6 +434,8 @@ export class Car {
     this.supersonicTime = 0;
     this.lastBallImpulseTick = -10;
     this.lastInput = { ...EMPTY_INPUT };
+    this.demoTimer = 0;
+    this.lastBumpTick = -1000;
   }
 
   tick(input: CarInput, dt: number): void {

@@ -24,6 +24,8 @@ export interface CarRenderState {
   steer: number;
   boosting: boolean;
   supersonic: boolean;
+  /** Demolished: not drawn at all until it respawns. */
+  demoed: boolean;
   /** Visual-only correction that decays after a misprediction (client's own car). */
   offsetPos: Vector3 | null;
   offsetQuat: Quaternion | null;
@@ -90,6 +92,7 @@ export function liveCarState(game: Game, id: number, alpha: number, name: string
     steer: car.lastInput.steer,
     boosting: car.boosting,
     supersonic: car.supersonic,
+    demoed: car.demoed,
     offsetPos: null,
     offsetQuat: null,
     wheelY: car.wheelCenterY([0, 0, 0, 0]),

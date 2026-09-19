@@ -6,8 +6,6 @@ import type { BodyState, BoostPad } from '../sim/game';
 import type { Team } from '../sim/car';
 import type { CarRenderState } from '../net/session';
 import { BlobShadow, Explosion, Ribbon, glowTexture } from './effects';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OCTANE as OCT } from '../sim/rl';
 
 const pA = new THREE.Vector3();
 const pB = new THREE.Vector3();
@@ -65,8 +63,6 @@ export class Renderer {
   private readonly prevBallPos = new THREE.Vector3();
   private padTime = 0;
   private readonly tmpV = new THREE.Vector3();
-  /** Kenney car kit pieces (CC0), fitted to the Octane hitbox; null until loadAssets() resolves (box car meanwhile). */
-  private assets: { body: THREE.Mesh; wheel: THREE.Mesh; wheelRadius: number; bodyMaterial: Record<Team, THREE.Material> } | null = null;
   private readonly landingRing: THREE.Mesh;
   private readonly landingDisc: THREE.Mesh;
   private readonly padPops: { sprite: THREE.Sprite; age: number }[] = [];
@@ -99,7 +95,7 @@ export class Renderer {
     this.scene.add(this.ballGlow);
     this.scene.add(this.ballTrail.mesh);
     this.scene.add(this.ballShadow.mesh);
-    // Landing marker: where the airborne ball will touch the floor (RL's ground indicator).
+    // Ground marker: the ball's position straight down on the floor, shown at all times.
     this.landingRing = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
     this.landingRing.rotation.x = -Math.PI / 2;
     this.landingRing.renderOrder = 2;
@@ -117,51 +113,6 @@ export class Renderer {
     }
 
     window.addEventListener('resize', () => this.resize(container));
-  }
-
-  /**
-   * Load the Kenney car kit body and wheel (CC0). The kit paints everything from one palette
-   * texture, so the body's paint colour is found from the mesh's dominant UV cell and repainted
-   * per team into two derived textures. Failure leaves the procedural box car in place.
-   */
-  async loadAssets(): Promise<void> {
-    try {
-      const loader = new GLTFLoader();
-      const base = `${import.meta.env.BASE_URL}models/`;
-      const [car, wheel] = await Promise.all([loader.loadAsync(`${base}car.glb`), loader.loadAsync(`${base}wheel.glb`)]);
-      let body: THREE.Mesh | null = null;
-      car.scene.traverse((o) => {
-        if (!body && (o as THREE.Mesh).isMesh && o.name === 'body') body = o as THREE.Mesh;
-      });
-      let wheelMesh: THREE.Mesh | null = null;
-      wheel.scene.traverse((o) => {
-        if (!wheelMesh && (o as THREE.Mesh).isMesh) wheelMesh = o as THREE.Mesh;
-      });
-      if (!body || !wheelMesh) return;
-      const bodyMesh: THREE.Mesh = body;
-      const wm: THREE.Mesh = wheelMesh;
-      // Team materials from the palette.
-      const src = bodyMesh.material as THREE.MeshStandardMaterial;
-      const paintRgb = dominantTexel(bodyMesh.geometry, src.map);
-      const bodyMaterial = {} as Record<Team, THREE.Material>;
-      for (const team of ['blue', 'orange'] as Team[]) {
-        const map = paintRgb && src.map ? recolourPalette(src.map, paintRgb, TEAM_PAINT[team]) : src.map;
-        bodyMaterial[team] = new THREE.MeshLambertMaterial({ map: map ?? undefined, color: map ? 0xffffff : TEAM_PAINT[team] });
-      }
-      // Wheel: kit wheels are modelled with their axle along X, matching ours.
-      const wb = new THREE.Box3().setFromObject(wm);
-      const wheelRadius = (wb.max.y - wb.min.y) / 2;
-      wm.material = new THREE.MeshLambertMaterial({ map: src.map ?? undefined });
-      this.assets = { body: bodyMesh, wheel: wm, wheelRadius, bodyMaterial };
-      // Rebuild any cars already on screen with the new look.
-      for (const [id, v] of [...this.cars]) {
-        const team = v.team;
-        this.removeCar(id);
-        this.cars.set(id, this.buildCar(team));
-      }
-    } catch (err) {
-      console.warn('Car model unavailable, using the box car', err);
-    }
   }
 
   resize(container: HTMLElement): void {
@@ -202,6 +153,15 @@ export class Renderer {
         v.nameplate = null;
         v.name = '';
       }
+      // A demolished car is simply not drawn until it respawns.
+      v.group.visible = !s.demoed;
+      v.shadow.mesh.visible = !s.demoed;
+      if (s.demoed) {
+        v.trail.clear();
+        if (v.nameplate) v.nameplate.visible = false;
+        continue;
+      }
+      if (v.nameplate) v.nameplate.visible = true;
       applyInterpolated(v.group, s.prev, s.curr, s.alpha);
       if (s.offsetPos) v.group.position.add(s.offsetPos);
       if (s.offsetQuat) v.group.quaternion.premultiply(s.offsetQuat);
@@ -237,7 +197,6 @@ export class Renderer {
 
   syncBall(prev: BodyState, curr: BodyState, alpha: number, visible: boolean, offset: THREE.Vector3 | null, dt: number, vel?: { x: number; y: number; z: number }): void {
     applyInterpolated(this.ballMesh, prev, curr, alpha);
-    this.updateLandingMarker(visible, vel);
     if (offset) this.ballMesh.position.add(offset);
     this.ballMesh.visible = visible;
     this.ballGlow.visible = visible;
@@ -251,6 +210,7 @@ export class Renderer {
     } else this.ballTrail.clear();
     this.ballTrail.update(dt, this.camera.position);
     this.ballShadow.update(this.ballMesh.position, visible);
+    this.updateBallMarker(visible);
   }
 
   syncPads(pads: BoostPad[], dt: number): void {
@@ -300,60 +260,43 @@ export class Renderer {
   }
 
   /**
-   * Predict where the ball meets the floor by integrating its flight (gravity plus Rapier's
-   * linear damping) and park a ring there. Shown only while the ball is airborne; the ring
-   * grows with the time still to fall, like RL's indicator, and ignores walls.
+   * Ring on the floor directly beneath the ball, so its horizontal position is always readable
+   * even when it is high. The ring grows a little with height (so a high ball is easy to spot)
+   * and fades in only once the ball leaves the ground, where it would just sit on the ball.
    */
-  private updateLandingMarker(visible: boolean, vel?: { x: number; y: number; z: number }): void {
+  private updateBallMarker(visible: boolean): void {
     const p = this.ballMesh.position;
-    const airborne = visible && vel && (p.y > BALL.restZ + 0.35 || vel.y > 1.5);
-    if (!airborne) {
+    if (!visible) {
       this.landingRing.visible = false;
       this.landingDisc.visible = false;
       return;
     }
-    let x = p.x;
-    let y = p.y;
-    let z = p.z;
-    let vx = vel.x;
-    let vy = vel.y;
-    let vz = vel.z;
-    const h = 1 / 60;
-    const damp = 1 / (1 + h * BALL.drag);
-    let t = 0;
-    let landed = false;
-    for (let i = 0; i < 480; i++) {
-      vy -= GRAVITY * h;
-      vx *= damp;
-      vy *= damp;
-      vz *= damp;
-      x += vx * h;
-      y += vy * h;
-      z += vz * h;
-      t += h;
-      if (y <= BALL.restZ && vy < 0) {
-        landed = true;
-        break;
-      }
-    }
-    if (!landed || Math.abs(x) > ARENA.extentX || Math.abs(z) > ARENA.extentY + ARENA.goalDepth) {
-      this.landingRing.visible = false;
-      this.landingDisc.visible = false;
-      return;
-    }
-    const r = 1 + Math.min(2.2, t * 0.5);
-    this.landingRing.visible = true;
-    this.landingDisc.visible = true;
-    this.landingRing.position.set(x, 0.02, z);
-    this.landingDisc.position.set(x, 0.018, z);
+    const height = Math.max(0, p.y - BALL.restZ);
+    const fade = Math.min(1, height / 0.6); // on the floor the ring is redundant
+    this.landingRing.visible = fade > 0.02;
+    this.landingDisc.visible = this.landingRing.visible;
+    if (!this.landingRing.visible) return;
+    const r = 1 + Math.min(1.6, height * 0.05);
+    this.landingRing.position.set(p.x, 0.02, p.z);
+    this.landingDisc.position.set(p.x, 0.018, p.z);
     this.landingRing.scale.set(r, r, 1);
     this.landingDisc.scale.set(r, r, 1);
-    (this.landingRing.material as THREE.MeshBasicMaterial).opacity = 0.55 + 0.35 * Math.max(0, 1 - t / 2);
+    (this.landingRing.material as THREE.MeshBasicMaterial).opacity = 0.75 * fade;
+    (this.landingDisc.material as THREE.MeshBasicMaterial).opacity = 0.12 * fade;
   }
 
   /** Goal scored: burst at the ball's last visible position in the team's colour. */
   goalExplosion(team: Team): void {
-    const e = new Explosion(this.lastBallPos, TEAM_PAINT[team]);
+    this.burst(this.lastBallPos, TEAM_PAINT[team]);
+  }
+
+  /** Demolition: a white-hot burst where the two cars met. */
+  demoExplosion(x: number, y: number, z: number): void {
+    this.burst(this.tmpV.set(x, y, z), 0xfff0c8);
+  }
+
+  private burst(pos: THREE.Vector3, color: number): void {
+    const e = new Explosion(pos, color);
     this.explosions.push(e);
     this.scene.add(e.group);
   }
@@ -536,22 +479,60 @@ export class Renderer {
   // Car: a Fennec-style body on the Octane hitbox, with wheels at RL's positions
   // ---------------------------------------------------------------------------
 
+  /**
+   * The car: a boxy hot-hatch in the Fennec mould, built to the Octane hitbox it actually uses.
+   * The silhouette is one extruded side profile (short overhangs, steep windscreen, long flat
+   * roof, near-vertical tailgate) rather than a stack of boxes, so the shape reads correctly from
+   * every angle, with a bevel to catch the light on its edges. Everything is sized from
+   * HITBOX_HALF, so the visible car is exactly the shape the physics collides with.
+   */
   private buildCar(team: Team): CarVisual {
-    if (this.assets) return this.buildKitCar(team);
     const group = new THREE.Group();
     const body = new THREE.Group();
     body.position.copy(HITBOX_OFFSET);
     group.add(body);
 
-    const w = HITBOX_HALF.x * 2; // width 0.867
-    const h = HITBOX_HALF.y * 2; // height 0.387
-    const l = HITBOX_HALF.z * 2; // length 1.205
+    const hw = HITBOX_HALF.x; // 0.433 half width
+    const hh = HITBOX_HALF.y; // 0.193 half height
+    const hl = HITBOX_HALF.z; // 0.603 half length; the nose is at -z
 
     const paint = new THREE.MeshLambertMaterial({ color: TEAM_PAINT[team] });
-    const trim = new THREE.MeshLambertMaterial({ color: 0x151a22 });
-    const glass = new THREE.MeshLambertMaterial({ color: 0x0c1526 });
-    const light = new THREE.MeshBasicMaterial({ color: 0xfff1b8 });
-    const tail = new THREE.MeshBasicMaterial({ color: 0xff3b3b });
+    const trim = new THREE.MeshLambertMaterial({ color: 0x14181f });
+    const glass = new THREE.MeshLambertMaterial({ color: 0x0a1018 });
+    const chrome = new THREE.MeshLambertMaterial({ color: 0x9aa4b2 });
+    const headlight = new THREE.MeshBasicMaterial({ color: 0xfff4cf });
+    const taillight = new THREE.MeshBasicMaterial({ color: 0xff2e2e });
+
+    // Side profile, (z, y) with the nose at -z. Traced to read as a Fennec from the side:
+    // stubby nose, fast windscreen, flat roof running most of the length, blunt tail.
+    const p: [number, number][] = [
+      [-hl, -hh * 0.62],
+      [-hl, -hh * 0.02],
+      [-hl * 0.93, hh * 0.3],
+      [-hl * 0.46, hh * 0.4],
+      [-hl * 0.14, hh * 0.99],
+      [hl * 0.5, hh * 0.99],
+      [hl * 0.72, hh * 0.5],
+      [hl * 0.99, hh * 0.36],
+      [hl * 0.99, -hh * 0.62],
+    ];
+    const shape = new THREE.Shape();
+    shape.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) shape.lineTo(p[i][0], p[i][1]);
+    shape.closePath();
+    const bevel = 0.014;
+    const shell = new THREE.ExtrudeGeometry(shape, {
+      depth: hw * 2 - bevel * 2,
+      bevelEnabled: true,
+      bevelThickness: bevel,
+      bevelSize: bevel,
+      bevelSegments: 2,
+      curveSegments: 1,
+    });
+    // Extrusion runs along the shape's +Z; turn it so it runs across the car, and centre it.
+    shell.rotateY(-Math.PI / 2);
+    shell.translate(hw - bevel, 0, 0);
+    body.add(new THREE.Mesh(shell, paint));
 
     const box = (mat: THREE.Material, sx: number, sy: number, sz: number, x: number, y: number, z: number) => {
       const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat);
@@ -560,109 +541,72 @@ export class Renderer {
       return m;
     };
 
-    // Fennec: boxy, flat sides, tall square cabin set slightly back, short flat hood.
-    box(paint, w * 0.96, h * 0.5, l * 0.98, 0, -h * 0.22, 0); // lower body
-    box(trim, w * 0.98, h * 0.16, l * 1.0, 0, -h * 0.42, 0); // rocker / bumper line
-    box(paint, w * 0.86, h * 0.42, l * 0.52, 0, h * 0.2, l * 0.03); // cabin
-    box(glass, w * 0.87, h * 0.2, l * 0.5, 0, h * 0.22, l * 0.03); // window band
-    box(paint, w * 0.8, h * 0.06, l * 0.5, 0, h * 0.44, l * 0.03); // roof
-    box(paint, w * 0.92, h * 0.14, l * 0.24, 0, h * 0.02, -l * 0.35); // hood
-    box(paint, w * 0.92, h * 0.2, l * 0.2, 0, h * 0.0, l * 0.39); // trunk
-    box(trim, w * 0.9, h * 0.1, 0.03, 0, -h * 0.05, -l / 2 + 0.01); // front grille
-    box(light, w * 0.22, h * 0.1, 0.03, w * 0.32, h * 0.05, -l / 2 + 0.005); // headlights
-    box(light, w * 0.22, h * 0.1, 0.03, -w * 0.32, h * 0.05, -l / 2 + 0.005);
-    box(tail, w * 0.9, h * 0.08, 0.03, 0, h * 0.06, l / 2 - 0.005); // taillight bar
+    // Glasshouse: side windows sitting a hair proud of the flat flanks, plus screens front and back.
+    for (const side of [1, -1]) {
+      const win = box(glass, 0.012, hh * 0.42, hl * 0.6, side * (hw - 0.004), hh * 0.6, hl * 0.16);
+      win.rotation.x = 0;
+    }
+    const windscreen = box(glass, hw * 1.84, 0.014, hl * 0.42, 0, hh * 0.72, -hl * 0.31);
+    windscreen.rotation.x = -0.62; // rake back over the bonnet
+    const rearScreen = box(glass, hw * 1.84, 0.014, hl * 0.26, 0, hh * 0.74, hl * 0.61);
+    rearScreen.rotation.x = 0.72;
 
-    // Wheels at RL's hardpoints, relative to the body origin (not the hitbox).
-    const tire = new THREE.MeshLambertMaterial({ color: 0x111111 });
-    const rim = new THREE.MeshLambertMaterial({ color: 0x8a94a6 });
+    // Lower skirt and bumpers darken the bottom edge the way the real car's cladding does.
+    box(trim, hw * 2.02, hh * 0.3, hl * 1.98, 0, -hh * 0.78, 0);
+    box(trim, hw * 1.9, hh * 0.34, 0.05, 0, -hh * 0.3, -hl * 0.99); // front bumper
+    box(trim, hw * 1.9, hh * 0.34, 0.05, 0, -hh * 0.3, hl * 0.99); // rear bumper
+    box(chrome, hw * 1.2, hh * 0.16, 0.03, 0, -hh * 0.1, -hl * 1.0); // grille bar
+
+    // Lights.
+    for (const side of [1, -1]) {
+      box(headlight, hw * 0.44, hh * 0.16, 0.03, side * hw * 0.62, hh * 0.16, -hl * 0.955);
+      box(taillight, hw * 0.46, hh * 0.18, 0.03, side * hw * 0.6, hh * 0.18, hl * 0.99);
+    }
+
+    // Roof spoiler over the tailgate.
+    box(trim, hw * 1.7, hh * 0.1, hl * 0.12, 0, hh * 1.02, hl * 0.52);
+
+    // Wheels at RL's hardpoints and radii. Each pivot steers and rides the suspension; the holder
+    // inside it spins, so steering and roll never fight each other.
     const wheelDefs = [
       { x: OCTANE.frontWheelOffset.y, z: -OCTANE.frontWheelOffset.x, r: OCTANE.frontWheelRadius, front: true },
       { x: -OCTANE.frontWheelOffset.y, z: -OCTANE.frontWheelOffset.x, r: OCTANE.frontWheelRadius, front: true },
       { x: OCTANE.rearWheelOffset.y, z: -OCTANE.rearWheelOffset.x, r: OCTANE.rearWheelRadius, front: false },
       { x: -OCTANE.rearWheelOffset.y, z: -OCTANE.rearWheelOffset.x, r: OCTANE.rearWheelRadius, front: false },
     ];
-    const width = 0.19;
+    const tyreMat = new THREE.MeshLambertMaterial({ color: 0x0d0f12 });
+    const rimMat = new THREE.MeshLambertMaterial({ color: 0xb9c2cf });
     const wheels: CarVisual['wheels'] = [];
     for (const d of wheelDefs) {
       const pivot = new THREE.Group();
-      pivot.position.set(d.x + Math.sign(d.x) * 0.04, d.r - OCTANE.restZ, d.z);
-      const tireGeo = new THREE.CylinderGeometry(d.r, d.r, width, 18);
-      tireGeo.rotateZ(Math.PI / 2);
-      const mesh = new THREE.Mesh(tireGeo, tire);
-      const rimGeo = new THREE.CylinderGeometry(d.r * 0.6, d.r * 0.6, width + 0.01, 12);
-      rimGeo.rotateZ(Math.PI / 2);
-      mesh.add(new THREE.Mesh(rimGeo, rim));
-      pivot.add(mesh);
-      group.add(pivot);
-      wheels.push({ pivot, mesh, radius: d.r, front: d.front, restY: pivot.position.y });
-    }
-
-    const flameMaterial = new THREE.MeshBasicMaterial({ color: 0xffa62b });
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.9, 8), flameMaterial);
-    flame.rotation.x = Math.PI / 2; // tip points +Z (rear)
-    flame.position.set(0, -h * 0.1, l / 2 + 0.45);
-    flame.visible = false;
-    body.add(flame);
-
-    const trail = new Ribbon(10, 0.13, team === 'blue' ? 0x4f8cff : 0xff9030, 0.11, 0.55);
-    const shadow = new BlobShadow(0.95, 6);
-    this.scene.add(group, trail.mesh, shadow.mesh);
-    return { group, team, wheels, flame, flameMaterial, nameplate: null, name: '', trail, shadow };
-  }
-
-  /** Kenney kit body fitted to the Octane hitbox, kit wheels at RL's hardpoints and radii. */
-  private buildKitCar(team: Team): CarVisual {
-    const a = this.assets!;
-    const group = new THREE.Group();
-    const body = a.body.clone() as THREE.Mesh;
-    body.material = a.bodyMaterial[team];
-    // Kit cars face +Z; ours face -Z. Fit the body's box to the hitbox (a touch taller so the
-    // roofline is not squashed), centred on the hitbox centre.
-    body.rotation.set(0, Math.PI, 0);
-    body.position.set(0, 0, 0);
-    body.scale.set(1, 1, 1);
-    body.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(body);
-    const size = box.getSize(new THREE.Vector3());
-    const sx = (HITBOX_HALF.x * 2) / size.x;
-    const sy = (HITBOX_HALF.y * 2 * 1.18) / size.y;
-    const sz = (HITBOX_HALF.z * 2) / size.z;
-    body.scale.set(sx, sy, sz);
-    body.updateMatrixWorld(true);
-    const box2 = new THREE.Box3().setFromObject(body);
-    const centre = box2.getCenter(new THREE.Vector3());
-    body.position.set(HITBOX_OFFSET.x - centre.x, HITBOX_OFFSET.y - centre.y + HITBOX_HALF.y * 0.09, HITBOX_OFFSET.z - centre.z);
-    group.add(body);
-
-    const wheelDefs = [
-      { x: OCT.frontWheelOffset.y, z: -OCT.frontWheelOffset.x, r: OCT.frontWheelRadius, front: true },
-      { x: -OCT.frontWheelOffset.y, z: -OCT.frontWheelOffset.x, r: OCT.frontWheelRadius, front: true },
-      { x: OCT.rearWheelOffset.y, z: -OCT.rearWheelOffset.x, r: OCT.rearWheelRadius, front: false },
-      { x: -OCT.rearWheelOffset.y, z: -OCT.rearWheelOffset.x, r: OCT.rearWheelRadius, front: false },
-    ];
-    const wheels: CarVisual['wheels'] = [];
-    for (const d of wheelDefs) {
-      const pivot = new THREE.Group();
-      const restY = d.r - OCT.restZ;
-      pivot.position.set(d.x + Math.sign(d.x) * 0.03, restY, d.z);
-      const holder = new THREE.Group(); // rolls about X; the kit wheel's hub faces +X, so mirror the right side
-      const mesh = a.wheel.clone();
-      const k = d.r / a.wheelRadius;
-      mesh.scale.setScalar(k);
-      mesh.rotation.y = d.x < 0 ? Math.PI : 0;
-      holder.add(mesh);
+      const restY = d.r - OCTANE.restZ;
+      pivot.position.set(d.x + Math.sign(d.x) * 0.035, restY, d.z);
+      const holder = new THREE.Group();
+      const width = 0.175;
+      const tyre = new THREE.CylinderGeometry(d.r, d.r, width, 16);
+      tyre.rotateZ(Math.PI / 2);
+      const tyreMesh = new THREE.Mesh(tyre, tyreMat);
+      const rim = new THREE.CylinderGeometry(d.r * 0.62, d.r * 0.62, width + 0.012, 12);
+      rim.rotateZ(Math.PI / 2);
+      tyreMesh.add(new THREE.Mesh(rim, rimMat));
+      // Spokes: a couple of thin bars so the wheel visibly turns.
+      for (let k = 0; k < 3; k++) {
+        const spoke = new THREE.Mesh(new THREE.BoxGeometry(width + 0.014, d.r * 1.1, 0.035), rimMat);
+        spoke.rotation.x = (k * Math.PI) / 3;
+        tyreMesh.add(spoke);
+      }
+      holder.add(tyreMesh);
       pivot.add(holder);
       group.add(pivot);
       wheels.push({ pivot, mesh: holder, radius: d.r, front: d.front, restY });
     }
 
     const flameMaterial = new THREE.MeshBasicMaterial({ color: 0xffa62b });
-    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.9, 8), flameMaterial);
-    flame.rotation.x = Math.PI / 2;
-    flame.position.set(0, HITBOX_OFFSET.y - HITBOX_HALF.y * 0.2, HITBOX_OFFSET.z + HITBOX_HALF.z + 0.45);
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.85, 8), flameMaterial);
+    flame.rotation.x = Math.PI / 2; // tip points to the rear
+    flame.position.set(0, -hh * 0.15, hl + 0.42);
     flame.visible = false;
-    group.add(flame);
+    body.add(flame);
 
     const trail = new Ribbon(10, 0.13, team === 'blue' ? 0x4f8cff : 0xff9030, 0.11, 0.55);
     const shadow = new BlobShadow(0.95, 6);
@@ -689,88 +633,6 @@ function applyInterpolated(obj: THREE.Object3D, a: BodyState, b: BodyState, alph
 /** Front-wheel steer angle at full lock for a given forward speed (RL's steer curve). */
 function steerAngleFor(forwardSpeed: number): number {
   return curve(CAR.steerAngleFromSpeedCurve, Math.abs(forwardSpeed) / UU);
-}
-
-/** The palette colour most of a mesh's vertices point at (the paint colour of a Kenney kit body). */
-function dominantTexel(geometry: THREE.BufferGeometry, map: THREE.Texture | null): [number, number, number] | null {
-  const uv = geometry.attributes.uv as THREE.BufferAttribute | undefined;
-  const img = map?.image as (HTMLImageElement | ImageBitmap | HTMLCanvasElement) | undefined;
-  if (!uv || !img || !img.width) return null;
-  const cv = document.createElement('canvas');
-  cv.width = img.width;
-  cv.height = img.height;
-  const ctx = cv.getContext('2d')!;
-  ctx.drawImage(img, 0, 0);
-  const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
-  const counts = new Map<number, number>();
-  for (let i = 0; i < uv.count; i++) {
-    const u = uv.getX(i) - Math.floor(uv.getX(i));
-    let v = uv.getY(i) - Math.floor(uv.getY(i));
-    if (map!.flipY) v = 1 - v;
-    const px = Math.min(cv.width - 1, Math.floor(u * cv.width));
-    const py = Math.min(cv.height - 1, Math.floor(v * cv.height));
-    const o = (py * cv.width + px) * 4;
-    // Only saturated, reasonably bright texels count: the paint, not tyres, glass or trim.
-    const r = data[o];
-    const g = data[o + 1];
-    const b = data[o + 2];
-    const mx = Math.max(r, g, b);
-    const mn = Math.min(r, g, b);
-    if (mx < 60 || (mx - mn) / Math.max(1, mx) < 0.35) continue;
-    const key = (r << 16) | (g << 8) | b;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  let best = -1;
-  let bestN = 0;
-  for (const [k, n] of counts) if (n > bestN) [best, bestN] = [k, n];
-  return best < 0 ? null : [(best >> 16) & 255, (best >> 8) & 255, best & 255];
-}
-
-/**
- * Copy a palette texture with every texel of the paint's hue (all its light and dark shades)
- * repainted to the team colour, keeping each shade's relative lightness and the GLTF texture
- * settings. Greys and other hues (glass, lights, tyres) are left alone.
- */
-function recolourPalette(map: THREE.Texture, from: [number, number, number], toHex: number): THREE.Texture {
-  const img = map.image as HTMLImageElement | ImageBitmap | HTMLCanvasElement;
-  const cv = document.createElement('canvas');
-  cv.width = img.width;
-  cv.height = img.height;
-  const ctx = cv.getContext('2d')!;
-  ctx.drawImage(img, 0, 0);
-  const id = ctx.getImageData(0, 0, cv.width, cv.height);
-  const d = id.data;
-  const src = new THREE.Color(from[0] / 255, from[1] / 255, from[2] / 255);
-  const srcHsl = { h: 0, s: 0, l: 0 };
-  src.getHSL(srcHsl);
-  const team = new THREE.Color(toHex).convertLinearToSRGB();
-  const teamHsl = { h: 0, s: 0, l: 0 };
-  team.getHSL(teamHsl);
-  const px = new THREE.Color();
-  const hsl = { h: 0, s: 0, l: 0 };
-  for (let i = 0; i < d.length; i += 4) {
-    px.setRGB(d[i] / 255, d[i + 1] / 255, d[i + 2] / 255);
-    px.getHSL(hsl);
-    let dh = Math.abs(hsl.h - srcHsl.h);
-    if (dh > 0.5) dh = 1 - dh;
-    if (hsl.s < 0.2 || dh > 0.07) continue; // not a shade of the paint
-    const l = Math.min(0.92, Math.max(0.05, teamHsl.l * (hsl.l / Math.max(0.05, srcHsl.l))));
-    px.setHSL(teamHsl.h, teamHsl.s, l);
-    d[i] = Math.round(px.r * 255);
-    d[i + 1] = Math.round(px.g * 255);
-    d[i + 2] = Math.round(px.b * 255);
-  }
-  ctx.putImageData(id, 0, 0);
-  const tex = new THREE.CanvasTexture(cv);
-  tex.flipY = map.flipY;
-  tex.colorSpace = map.colorSpace;
-  tex.wrapS = map.wrapS;
-  tex.wrapT = map.wrapT;
-  tex.magFilter = map.magFilter;
-  tex.minFilter = map.minFilter;
-  tex.generateMipmaps = map.generateMipmaps;
-  tex.needsUpdate = true;
-  return tex;
 }
 
 /** Name floating above another player's car. Canvas text on a sprite, built once per name. */

@@ -25,12 +25,13 @@
       #clock { position: absolute; top: 50px; left: 50%; transform: translateX(-50%); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 1px; opacity: .9; }
       #clock.overtime { color: #ffd166; }
       #clock[hidden] { display: none; }
-      #ping { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
+      #ping { opacity: .75; }
       #ping[hidden] { display: none; }
       #ping.bad { color: #ff6b6b; opacity: 1; }
       #banner .sub { font-size: 20px; font-weight: 600; opacity: .85; margin-top: 6px; }
       #banner.countdown .title { font-size: 120px; line-height: 1; }
-      #fps { position: absolute; top: 12px; right: 16px; font-size: 13px; opacity: .7; font-variant-numeric: tabular-nums; }
+      #topright { position: absolute; top: 12px; right: 16px; display: flex; gap: 10px; align-items: baseline; font-size: 13px; font-variant-numeric: tabular-nums; }
+      #fps { opacity: .7; }
       #banner { position: absolute; top: 38%; left: 50%; transform: translate(-50%, -50%); text-align: center; display: none; }
       #banner .title { font-size: 56px; font-weight: 800; }
       #banner .goalSpeed { font-size: 22px; font-weight: 600; opacity: .9; margin-top: 4px; }
@@ -150,11 +151,10 @@
     <div id="hud" hidden>
       <div id="score"><span class="blue">BLUE 0</span> &nbsp;–&nbsp; <span class="orange">0 ORANGE</span></div>
       <div id="clock" hidden>5:00</div>
-      <div id="fps">— fps</div>
+      <div id="topright"><div id="ping" hidden>— ms</div><div id="fps">— fps</div></div>
       <div id="banner"><div class="title"></div><div class="goalSpeed"></div><div class="sub"></div></div>
       <div id="bottomleft">
         <div id="camMode" class="on">BALL CAM</div>
-        <div id="ping" hidden>PING — ms</div>
         <div id="controller">Loading…</div>
       </div>
       <div id="bottomright">

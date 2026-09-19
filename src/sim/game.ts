@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { Quaternion, Vector3 } from 'three';
-import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, BOOST_PADS, CAR, GRAVITY, KICKOFF_SPAWNS, TICK_DT, UU, curve } from './rl';
+import { ARENA, BALL, BALL_CAR_EXTRA_IMPULSE, BOOST_PADS, CAR, DEMO, GRAVITY, KICKOFF_SPAWNS, TICK_DT, UU, curve } from './rl';
 import { TUNING } from './tuning';
 import { allColliderBoxes, buildArenaGeometry, type ArenaGeometry } from './arena';
 import { Car, type CarState, type Team } from './car';
@@ -147,6 +147,10 @@ export class Game {
   ballTouched = false;
   /** Largest relative car-ball speed (m/s) among touches this tick, else 0. */
   ballHitRelSpeed = 0;
+  /** Demolitions this tick, for effects and sound: who was demolished, where, and by whom. */
+  readonly demosThisTick: { victim: number; attacker: number; x: number; y: number; z: number }[] = [];
+  /** Car-car bumps this tick, for effects: impact speed in m/s at the contact point. */
+  readonly bumpsThisTick: { a: number; b: number; speed: number; x: number; y: number; z: number }[] = [];
   /** Magnitude of the ball's velocity change (m/s) this tick when no car touched it (arena bounce), else 0. */
   ballBounceDeltaV = 0;
   /** Index into KICKOFF_SPAWNS used by the first blue car at the current kickoff. */
@@ -264,6 +268,13 @@ export class Game {
 
     for (const car of this.cars.values()) {
       const input = inputs instanceof Map ? (inputs.get(car.id) ?? car.lastInput) : (inputs as CarInput);
+      if (car.demoed) {
+        // Demolished: not simulated at all, just counting down to the respawn.
+        car.lastInput = input;
+        car.demoTimer -= dt;
+        if (car.demoTimer <= 0) this.respawnCar(car);
+        continue;
+      }
       if (frozen) {
         car.lastInput = input;
         continue;
@@ -272,15 +283,19 @@ export class Game {
     }
 
     this.world.step();
-    if (!frozen) for (const car of this.cars.values()) car.postStep();
+    if (!frozen) for (const car of this.cars.values()) if (!car.demoed) car.postStep();
     this.tick++;
+
+    this.demosThisTick.length = 0;
+    this.bumpsThisTick.length = 0;
+    if (!frozen) this.resolveCarContacts();
 
     this.updatePads(dt);
     this.ballHitRelSpeed = 0;
     this.ballBounceDeltaV = 0;
     this.ballTouched = false;
     if (this.phase === 'play' || this.phase === 'over') {
-      for (const car of this.cars.values()) this.applyCarBallExtraImpulse(car);
+      for (const car of this.cars.values()) if (!car.demoed) this.applyCarBallExtraImpulse(car);
       this.clampBall();
       if (!this.ballTouched) {
         const bv1 = this.ball.linvel();
@@ -354,6 +369,8 @@ export class Game {
     let blue = 0;
     let orange = 0;
     for (const car of this.cars.values()) {
+      car.setDemoed(false);
+      car.demoTimer = 0;
       const slot = car.team === 'blue' ? blue++ : orange++;
       this.placeCar(car, (this.currentSpawn + slot) % KICKOFF_SPAWNS.length);
     }
@@ -675,7 +692,7 @@ export class Game {
         continue;
       }
       for (const car of this.cars.values()) {
-        if (car.boost >= CAR.boostMax) continue;
+        if (car.demoed || car.boost >= CAR.boostMax) continue;
         const t = car.body.translation();
         const dx = t.x - p.x;
         const dz = t.z - p.z;
@@ -690,6 +707,85 @@ export class Game {
         break;
       }
     }
+  }
+
+  /**
+   * Car-car contact. Rapier already resolves the collision itself; this adds RL's two extras.
+   *
+   * A demolition happens when the attacking car's supersonic flag is set (measured against
+   * RocketSim: contacts at up to 1508 uu/s relative never demolished with the flag clear, and one
+   * at 1040 uu/s did with it set). Teammates never demolish each other. Otherwise the pair gets a
+   * bump impulse on top of the collision, rate-limited so a resting contact does not repeat it.
+   */
+  private resolveCarContacts(): void {
+    const cars = [...this.cars.values()];
+    for (let i = 0; i < cars.length; i++) {
+      const a = cars[i];
+      if (a.demoed) continue;
+      for (let j = i + 1; j < cars.length; j++) {
+        const b = cars[j];
+        if (b.demoed) continue;
+        let touching = false;
+        this.world.contactPair(a.collider, b.collider, (manifold) => {
+          for (let k = 0; k < manifold.numContacts(); k++) {
+            if (manifold.contactDist(k) <= 0) {
+              touching = true;
+              return;
+            }
+          }
+        });
+        if (!touching) continue;
+
+        const pa = a.body.translation();
+        const pb = b.body.translation();
+        const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2, z: (pa.z + pb.z) / 2 };
+        const va = a.preStepVel;
+        const vb = b.preStepVel;
+        const relSpeed = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
+
+        const opponents = a.team !== b.team;
+        const aDemos = opponents && a.supersonic;
+        const bDemos = opponents && b.supersonic;
+        if (aDemos || bDemos) {
+          // Both supersonic into each other: both go.
+          if (bDemos) this.demolish(a, b.id, mid);
+          if (aDemos) this.demolish(b, a.id, mid);
+          continue;
+        }
+
+        if (this.tick - a.lastBumpTick < TUNING.bumpCooldown / TICK_DT) continue;
+        a.lastBumpTick = this.tick;
+        b.lastBumpTick = this.tick;
+        this.bumpsThisTick.push({ a: a.id, b: b.id, speed: relSpeed, ...mid });
+        const mag = Math.min(TUNING.bumpMaxVel, relSpeed * TUNING.bumpVelPerRelSpeed);
+        if (mag <= 0) continue;
+        // Push each car away from the other, with RL's upward kick.
+        relVel.set(pb.x - pa.x, 0, pb.z - pa.z);
+        if (relVel.lengthSq() < 1e-6) continue;
+        relVel.normalize();
+        const up = mag * TUNING.bumpUpwardFraction;
+        const bv = b.body.linvel();
+        b.body.setLinvel({ x: bv.x + relVel.x * mag, y: bv.y + up, z: bv.z + relVel.z * mag }, true);
+        const av = a.body.linvel();
+        a.body.setLinvel({ x: av.x - relVel.x * mag, y: av.y + up, z: av.z - relVel.z * mag }, true);
+      }
+    }
+  }
+
+  private demolish(victim: Car, attacker: number, at: { x: number; y: number; z: number }): void {
+    if (victim.demoed) return;
+    this.demosThisTick.push({ victim: victim.id, attacker, x: at.x, y: at.y, z: at.z });
+    victim.setDemoed(true);
+    victim.demoTimer = DEMO.respawnTime;
+  }
+
+  /** Put a demolished car back on its team's side, as RL does after the respawn delay. */
+  private respawnCar(car: Car): void {
+    car.setDemoed(false);
+    car.demoTimer = 0;
+    let n = 0;
+    for (const c of this.cars.values()) if (c !== car && c.team === car.team) n++;
+    this.placeCar(car, (this.currentSpawn + n) % KICKOFF_SPAWNS.length);
   }
 
   /**

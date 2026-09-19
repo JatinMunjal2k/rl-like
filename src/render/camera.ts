@@ -70,6 +70,8 @@ export class FollowCamera {
   private readonly viewDir = new THREE.Vector3(0, 0, -1);
   /** Smoothed heading (rad, our convention: 0 faces -Z) for the car cam. */
   private yaw = 0;
+  /** The car's own heading last frame, to spot the jump a flip makes. NaN until first seen. */
+  private lastCarYaw = Number.NaN;
   /** Smoothed pivot up reference (world up in the air / ball cam, the car's up on a surface). */
   private readonly upRef = new THREE.Vector3(0, 1, 0);
   private readonly camUp = new THREE.Vector3(0, 1, 0);
@@ -127,13 +129,17 @@ export class FollowCamera {
       this.upRef.copy(WORLD_UP);
       this.camUp.copy(WORLD_UP);
     } else {
-      // Heading from the nose. Hold it when the nose is near vertical or when it jumps by more
-      // than 90° (the car is flipping over), which is how RL keeps flips from spinning the view.
+      // Heading from the nose. A flip swings the nose through vertical, which makes the heading
+      // jump by about 180° in one frame; hold through that, and through a near-vertical nose whose
+      // heading is meaningless. The comparison is against the CAR's previous heading, not the
+      // camera's: comparing against the camera would latch forever whenever the view starts far
+      // from the nose, which is exactly what happens the moment ball cam is switched off.
       const fh = Math.hypot(carFwd.x, carFwd.z);
       if (fh > 0.25) {
         const y = Math.atan2(-carFwd.x, -carFwd.z);
-        if (Math.abs(shortestAngle(this.yaw, y)) < 0.5 * Math.PI || !this.initialized) targetYaw = y;
-        else targetYaw = this.yaw;
+        const jumped = Number.isFinite(this.lastCarYaw) && Math.abs(shortestAngle(this.lastCarYaw, y)) > 0.5 * Math.PI;
+        targetYaw = jumped ? this.yaw : y;
+        if (!jumped) this.lastCarYaw = y;
       } else targetYaw = this.yaw;
       if (state.grounded) {
         // On a surface: pivot along the car's up, pitch follows ~75% of the nose pitch, roll a tenth of the bank.

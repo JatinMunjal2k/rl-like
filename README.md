@@ -65,6 +65,12 @@ Everything except the steering axis can be rebound in Settings. Bindings persist
 
 Landed on your roof? Press jump (RL's autoflip). On your side, hold throttle (autoroll). Flip cancel works: pitch against a flip while it is running.
 
+## Build identity
+
+Every build is stamped with the commit it came from. The menu (which is also the pause screen) shows it in the bottom right, for example `v0.1.0 · 4e9c735 · 2026-09-19 06:33`, and the same string is logged to the console at startup. A build made from a working tree with uncommitted edits says `uncommitted`, so a local test is never mistaken for a deployed one.
+
+Quote that string when reporting anything: it maps straight back to `git show <sha>`. It comes from `vite.config.ts`, which runs git at build time and injects the values, so it needs no upkeep.
+
 ## Architecture
 
 ```

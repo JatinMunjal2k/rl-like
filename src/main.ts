@@ -8,6 +8,7 @@ import { EMPTY_INPUT } from './input/types';
 import { MATCH_LENGTHS, Menu, type MenuContext } from './ui/menu';
 import { SoundManager } from './audio/sound';
 import { loadSettings, saveSettings } from './settings';
+import { buildLabel } from './build';
 import { LocalSession, type Session } from './net/session';
 import { HostSession } from './net/host';
 import { ClientSession } from './net/client';
@@ -59,6 +60,7 @@ function formatClock(seconds: number): string {
 }
 
 async function main(): Promise<void> {
+  console.info(`RL-like ${buildLabel()}`);
   const settings = loadSettings();
   // The arena is static: build its geometry once for the renderer, independent of any game.
   const arenaGeometry = buildArenaGeometry();

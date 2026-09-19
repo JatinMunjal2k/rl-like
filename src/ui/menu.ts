@@ -2,6 +2,7 @@ import { ACTIONS, ACTION_LABELS, gamepadButtonName, keyName, type Action, type C
 import type { FrameInput } from '../input/types';
 import { CAMERA_DEFS, CONTROL_DEFS, DEFAULT_SETTINGS, getSetting, setSetting, type SettingDef, type Settings } from '../settings';
 import type { LobbyState } from '../net/session';
+import { buildLabel } from '../build';
 
 export type MenuScreen = 'main' | 'multiplayer' | 'lobby' | 'settings' | 'controls' | 'camera' | 'gameplay' | 'hidden';
 type PanelId = Exclude<MenuScreen, 'hidden'>;
@@ -79,6 +80,11 @@ export class Menu {
     this.buildControls();
     this.buildSliders('camera', 'Camera', CAMERA_DEFS, 'settings');
     this.buildSliders('gameplay', 'Gameplay', CONTROL_DEFS, 'settings');
+    // Build stamp, visible on every menu screen: quote it when reporting something.
+    const version = el('div', 'build-stamp');
+    version.textContent = buildLabel();
+    version.title = 'Build identifier — include this when reporting a problem';
+    this.root.appendChild(version);
     container.appendChild(this.root);
     this.show('main');
   }
